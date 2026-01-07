@@ -992,46 +992,12 @@
         console.log("Picked tile:", currentTileId);
     };
 
-    // Add 'S' key listener for saving
     document.addEventListener('keydown', (event) => {
-        if (event.key === 's' || event.key === 'S') {
-            if (isEditMode && !isWorldMap) {
-                saveMap();
-            }
-        }
         // Layer switching
         if (event.key === '1') { currentZ = 0; console.log("Layer 1"); }
         if (event.key === '2') { currentZ = 1; console.log("Layer 2"); }
         if (event.key === '3') { currentZ = 2; console.log("Layer 3"); }
         if (event.key === '4') { currentZ = 3; console.log("Layer 4"); }
     });
-
-    function saveMap() {
-        console.log("Saving map...");
-        // Get raw data
-        const mapData = $dataMap.data; // Array
-
-        fetch(`/api/explore/map/save`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": exploreAuthToken ? `Bearer ${exploreAuthToken}` : ""
-            },
-            body: JSON.stringify({
-                guild_id: currentGuildId,
-                map_data: mapData
-            })
-        })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    console.log("Map saved successfully!");
-                    alert("Map Saved!");
-                } else {
-                    console.error("Failed to save map", data);
-                    alert("Failed to save map: " + (data.error || "Unknown error"));
-                }
-            });
-    }
 
 })();
