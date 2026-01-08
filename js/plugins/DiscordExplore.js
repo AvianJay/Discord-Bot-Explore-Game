@@ -417,25 +417,6 @@
         entry.sprite = sprite;
     }
 
-    function detachSpriteForUserId(userId) {
-        const entry = otherPlayers[userId];
-        if (!entry || !entry.sprite) return;
-
-        const sprite = entry.sprite;
-        entry.sprite = null;
-
-        try {
-            if (sprite.parent) sprite.parent.removeChild(sprite);
-        } catch (_) { }
-
-        const scene = SceneManager._scene;
-        const spriteset = scene && scene._spriteset;
-        if (spriteset && Array.isArray(spriteset._characterSprites)) {
-            const idx = spriteset._characterSprites.indexOf(sprite);
-            if (idx >= 0) spriteset._characterSprites.splice(idx, 1);
-        }
-    }
-
     function refreshRemotePlayerSprites() {
         // When map changes, a new spriteset is created; reattach sprites.
         for (const uid of Object.keys(otherPlayers)) {
@@ -570,68 +551,6 @@
         }
         const entry = otherPlayers[userId];
         if (!entry) return;
-
-        // 取得目標座標與方向
-        // const targetX = Number(data.x);
-        // const targetY = Number(data.y);
-        // const targetDir = data.direction != null ? Number(data.direction) : null;
-
-        // if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) return;
-
-        // // --- 核心邏輯修正 ---
-
-        // // 1. 計算與當前位置的距離
-        // // RPG Maker 的 x/y 是邏輯座標，會在 moveStraight 瞬間更新
-        // const dx = targetX - entry.character.x;
-        // const dy = targetY - entry.character.y;
-        // const distance = Math.abs(dx) + Math.abs(dy);
-
-        // // 2. 距離為 0：表示邏輯上已經到達，或收到重複封包
-        // if (distance === 0) {
-        //     // 雖然位置一樣，但如果方向變了，還是要轉頭
-        //     if (targetDir) {
-        //         console.log("Correcting direction for", userId, "to", targetDir);
-        //         entry.character.setDirection(targetDir);
-        //     }
-        //     // 絕對不要在這裡呼叫 locate，否則正在走路的動畫會被切斷，看起來像「少走一格」
-        //     return;
-        // }
-
-        // // 3. 距離為 1：應該平滑移動
-        // if (distance === 1) {
-        //     // 計算正確的移動方向，而不是依賴 data.direction
-        //     // 因為 data.direction 可能是玩家停下來時的朝向，不一定是移動向量
-        //     let moveDir = 0;
-        //     if (dy > 0) moveDir = 2;      // 向下
-        //     else if (dx < 0) moveDir = 4; // 向左
-        //     else if (dx > 0) moveDir = 6; // 向右
-        //     else if (dy < 0) moveDir = 8; // 向上
-        //     console.log("Moving player", userId, "towards", targetX, targetY, "using direction", moveDir);
-
-        //     // ★關鍵修正：暫時開啟「穿透模式」
-        //     // 避免其他玩家因為撞到你本地的 NPC 或牆壁而導致 moveStraight 失敗
-        //     const originalThrough = entry.character.isThrough();
-        //     entry.character.setThrough(true);
-
-        //     // 執行移動
-        //     entry.character.moveStraight(moveDir);
-
-        //     // 如果你是嚴格要保持碰撞，可以在這裡設回去，但建議聯機玩家保持穿透
-        //     // entry.character.setThrough(originalThrough);
-
-        //     // 補正：如果移動後，最後的朝向跟封包不同，強制修正朝向 (例如螃蟹走路)
-        //     if (targetDir && entry.character.direction() !== targetDir) {
-        //         entry.character.setDirection(targetDir);
-        //     }
-        // }
-        // // 4. 距離 > 1：落後太多，強制瞬移 (Locate)
-        // else {
-        //     console.log("Teleporting player", userId, "to", targetX, targetY);
-        //     entry.character.locate(targetX, targetY);
-        //     if (targetDir) {
-        //         entry.character.setDirection(targetDir);
-        //     }
-        // }
 
         entry.character.setMoveSpeed(data.moveSpeed);
         entry.character.setMoveFrequency(data.moveFrequency);
