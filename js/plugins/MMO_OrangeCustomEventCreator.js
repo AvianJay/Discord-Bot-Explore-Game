@@ -6,6 +6,7 @@
  * Free for commercial and non commercial use.
  *=============================================================================*/
  /*:
+ * @target MV MZ
  * @plugindesc This plugin Will let you create virtual events with script calls
  *             
  * @author Hudell (Axel Fiolle edit)

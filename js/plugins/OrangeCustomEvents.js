@@ -6,6 +6,7 @@
  * Free for commercial and non commercial use.
  *=============================================================================*/
  /*:
+ * @target MV MZ
  * @plugindesc This plugin Will let you add or copy events to the current map
  *             
  * @author Hudell
