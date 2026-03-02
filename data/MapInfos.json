@@ -1,6 +1,8 @@
 [
 null,
-{"id":1,"expanded":true,"name":"World","order":2,"parentId":0,"scrollX":411.55555555555554,"scrollY":320.8888888888889},
-{"id":2,"expanded":false,"name":"GuildRoom","order":3,"parentId":1,"scrollX":505.5,"scrollY":330,"quick":false},
-{"id":3,"expanded":false,"name":"WaitRoom","order":1,"parentId":0,"scrollX":0,"scrollY":0,"quick":false}
+{"id":1,"expanded":true,"name":"World","order":2,"parentId":0,"scrollX":648.8,"scrollY":367.2},
+{"id":2,"expanded":false,"name":"GuildRoom","order":3,"parentId":1,"scrollX":648.8,"scrollY":367.2,"quick":false},
+{"id":3,"expanded":false,"name":"WaitRoom","order":1,"parentId":0,"scrollX":648.8,"scrollY":360.8,"quick":false},
+{"id":4,"expanded":true,"name":"metalworld","order":4,"parentId":0,"scrollX":0,"scrollY":0,"quick":false},
+{"id":5,"expanded":false,"name":"intro","order":5,"parentId":4,"scrollX":648.8,"scrollY":1072.8,"quick":false}
 ]

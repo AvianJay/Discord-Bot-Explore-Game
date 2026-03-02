@@ -2,6 +2,13 @@
  * @target MZ
  * @plugindesc Discord Explore Integration
  * @author AvianJay
+ * 
+ * @command InitializeSDK
+ * @text 初始化 SDK
+ * @desc 初始化 Discord Embedded App SDK 並連線到 Explore 後端。
+ * 
+ * @arg switchId
+ * @type switch
  *
  * @command OpenServerList
  * @text 伺服器清單
@@ -10,6 +17,10 @@
  * @command ChangeSkin
  * @text 更換外觀
  * @desc 顯示可用皮膚清單，選擇後呼叫 API 設定並同步到空間。
+ *
+ * @command TransferToTarget
+ * @text 傳送至目標地圖
+ * @desc 根據初始化時判斷的目標（大廳或伺服器空間），傳送玩家到對應地圖。
  *
  * @command LeaveSpace
  * @text 離開空間
@@ -25,7 +36,11 @@
     const PLUGIN_NAME = "DiscordExplore";
 
     const MAP_WORLD = 1;
-    const MAP_SPACE = 2; // MAP002
+    const MAP_SPACE = 2; // MAP002 — 伺服器空間
+    const MAP_WAIT  = 3; // 等待室 / 起始地圖
+
+    // 不加入任何房間的地圖 ID（等待室、過場動畫等）
+    const IGNORED_MAPS = [3, 5];
 
     // State
     let discordSdk = null;
@@ -49,77 +64,108 @@
     let currentTileId = 0;
     let currentZ = 0; // 0=Layer 1, 1=Layer 2, etc.
 
-    // --- Discord SDK Setup ---
-    async function initDiscordSDK() {
-        const module = await import('../libs/embedded-app-sdk/index.mjs');
-        const { DiscordSDK } = module;
-        if (typeof DiscordSDK === 'undefined') {
-            console.error("Discord SDK not loaded. Please add the script to index.html");
-            return;
-        }
+    // --- Dev / Test Mode ---
+    let isDevMode = false;
+    let _pendingInputCallback = null;
 
-        // get query param
+    function detectDevMode() {
         const urlParams = new URLSearchParams(window.location.search);
-        const instanceParam = urlParams.get('instance_id');
-        if (!instanceParam) {
-            console.warn("No instance_id query param provided");
-            return;
+        if (!urlParams.get('instance_id')) {
+            const h = window.location.hostname;
+            if (!h || h === 'localhost' || h === '127.0.0.1' || h === 'njgcanhfjdabfmnlmpmdedalocpafnhl' || window.location.protocol === 'file:') {
+                isDevMode = true;
+                console.log("[Explore] 開發模式啟用 — 略過 Discord SDK 與 Socket.IO");
+            }
         }
-        const guildIdParam = urlParams.get('guild_id');
-        if (guildIdParam) {
-            currentGuildId = guildIdParam;
-            isWorldMap = false;
-            console.log("Guild ID from query param:", currentGuildId);
-        } else {
+        return isDevMode;
+    }
+
+    /** 安全發送 Socket.IO 事件；開發模式或未連線時僅輸出 log */
+    function safeEmit(event, data) {
+        if (socket && socket.connected) {
+            socket.emit(event, data);
+        } else if (isDevMode) {
+            console.log(`[DevMode] emit '${event}':`, data);
+        }
+    }
+
+    /** 等待使用者點擊或按鍵後執行回呼 */
+    function awaitUserInput(callback) {
+        _pendingInputCallback = callback;
+    }
+
+    /** 目前地圖是否在忽略清單中（不同步、不加入房間） */
+    function isIgnoredMap() {
+        return $gameMap && IGNORED_MAPS.includes($gameMap.mapId());
+    }
+
+    // --- Discord SDK Setup ---
+    async function initDiscordSDK(switchId) {
+        HintBar.show("正在初始化...");
+
+        // --- 開發模式：略過 Discord SDK ---
+        if (detectDevMode()) {
+            myUserId = "dev_user";
+            myName = "Developer";
             isWorldMap = true;
             currentGuildId = 'world';
-            console.log("No Guild ID provided, loading World Map");
+            HintBar.show("開發模式");
+            if (switchId) $gameSwitches.setValue(switchId, true);
+            return;
         }
 
-        console.log("Fetching Client ID...");
+        // --- 階段 1：初始化 Discord SDK 並認證 ---
         try {
+            const urlParams = new URLSearchParams(window.location.search);
+            const instanceParam = urlParams.get('instance_id');
+            if (!instanceParam) {
+                HintBar.show("缺少 instance_id，無法啟動");
+                console.warn("No instance_id query param provided");
+                return;
+            }
+
+            const guildIdParam = urlParams.get('guild_id');            if (guildIdParam) {
+                currentGuildId = guildIdParam;
+                isWorldMap = false;
+                console.log("Guild ID from query param:", currentGuildId);
+            } else {
+                isWorldMap = true;
+                currentGuildId = 'world';
+                console.log("No Guild ID provided, loading World Map");
+            }
+
+            HintBar.show("正在取得用戶端資訊...");
             const statusRes = await fetch('/api/status');
             const statusData = await statusRes.json();
             clientId = statusData.id;
             console.log("Client ID fetched:", clientId);
-        } catch (e) {
-            console.error("Failed to fetch Client ID from /api/status", e);
-            return;
-        }
 
-        console.log("Initializing Discord SDK...");
-        discordSdk = new DiscordSDK(clientId);
-
-        try {
+            HintBar.show("正在連線至 Discord...");
+            const module = await import('../libs/embedded-app-sdk/index.mjs');
+            const { DiscordSDK } = module;
+            discordSdk = new DiscordSDK(clientId);
             await discordSdk.ready();
             console.log("Discord SDK Ready");
 
-            // Authorize
+            HintBar.show("正在登入...");
             const { code } = await discordSdk.commands.authorize({
                 client_id: clientId,
                 response_type: "code",
                 state: "",
                 prompt: "none",
-                scope: [
-                    "identify",
-                    "guilds",
-                    "rpc.activities.write",
-                ],
+                scope: ["identify", "guilds", "rpc.activities.write"],
             });
 
-            // Exchange OAuth code -> Discord access token (legacy route still exists)
             const response = await fetch(`/api/explore/authenticate`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ code }),
             });
-
             auth = await response.json();
             console.log("Authenticated with backend (discord token)", auth);
-
             await discordSdk.commands.authenticate({ access_token: auth.token });
 
-            // Exchange Discord token -> Explore auth_token (new API)
+            HintBar.show("正在取得身份資訊...");
             const tokenRes = await fetch(`/api/explore/auth/discord-token`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -127,33 +173,33 @@
             });
             const tokenData = await tokenRes.json();
             if (!tokenRes.ok || !tokenData.auth_token) {
+                HintBar.show("認證失敗");
                 console.error("Failed to get explore auth_token", tokenData);
                 return;
             }
             exploreAuthToken = tokenData.auth_token;
             console.log("Explore auth_token ready");
 
-            // Fetch my profile (name/skin)
             try {
                 const meRes = await fetch('/api/explore/me', {
                     headers: { "Authorization": `Bearer ${exploreAuthToken}` }
                 });
                 const me = await meRes.json();
-                if (meRes.ok) {
-                    myName = me.name;
-                }
+                if (meRes.ok) myName = me.name;
             } catch (e) {
                 console.warn("Failed to fetch /api/explore/me", e);
             }
 
-            // Connect Socket (auth required)
+            HintBar.show("正在連線至伺服器...");
             connectSocket();
 
-            // Boot map
-            decideMapToLoad();
+            // 初始化完成，設定開關讓事件繼續流程
+            HintBar.show("準備完成");
+            if (switchId) $gameSwitches.setValue(switchId, true);
 
         } catch (e) {
             console.error("Failed to initialize Discord SDK", e);
+            HintBar.show("初始化失敗: " + (e.message || e));
         }
     }
 
@@ -201,9 +247,10 @@
 
         socket.on('connect', () => {
             console.log("Socket connected");
-            socket.emit('join', {
-                guild_id: currentGuildId
-            });
+            // 重連時自動重新加入房間（首次連線在等待室不加入）
+            if (!isIgnoredMap() && currentGuildId) {
+                socket.emit('join', { guild_id: currentGuildId });
+            }
         });
 
         socket.on('joined', (data) => {
@@ -280,29 +327,19 @@
     });
 
     function leaveSpace() {
-        // Leave current room (space) but keep the socket connection alive for quick re-join.
-        if (socket && socket.connected && currentGuildId) {
-            socket.emit('leave', { guild_id: currentGuildId });
-        }
+        safeEmit('leave', { guild_id: currentGuildId });
 
-        // Switch to world
         currentGuildId = 'world';
         isWorldMap = true;
         pendingSpaceTiles = null;
 
-        // Transfer back to MAP001
         if ($gamePlayer) {
             $gamePlayer.reserveTransfer(MAP_WORLD, 8, 6, 2, 0);
             $gamePlayer.requestMapReload();
         }
 
-        // Refresh world data
         fetchMapData();
-
-        // Join world room for presence (optional)
-        if (socket && socket.connected) {
-            socket.emit('join', { guild_id: currentGuildId });
-        }
+        // 'join' 會在 onMapLoaded 中自動發送
     }
 
     function decideMapToLoad() {
@@ -493,14 +530,16 @@
 
             if (direction > 0) {
                 this.executeMove(direction);
-                socket.emit('move', {
-                    guild_id: currentGuildId,
-                    direction: direction,
-                    x: this.x,
-                    y: this.y,
-                    moveSpeed: this.realMoveSpeed(),
-                    moveFrequency: this.moveFrequency()
-                });
+                if (!isIgnoredMap()) {
+                    safeEmit('move', {
+                        guild_id: currentGuildId,
+                        direction: direction,
+                        x: this.x,
+                        y: this.y,
+                        moveSpeed: this.realMoveSpeed(),
+                        moveFrequency: this.moveFrequency()
+                    });
+                }
             }
         }
     };
@@ -792,9 +831,7 @@
                 if (!res.ok) {
                     console.error('Failed to set skin', data);
                 } else {
-                    if (socket && socket.connected) {
-                        socket.emit('skin_change', { guild_id: currentGuildId, skin_id: skin.id });
-                    }
+                    safeEmit('skin_change', { guild_id: currentGuildId, skin_id: skin.id });
                 }
             } catch (e) {
                 console.error('Failed to set skin', e);
@@ -805,46 +842,54 @@
 
     function connectToSpace(guildId) {
         if (!guildId) return;
-        if (socket && socket.connected && currentGuildId) {
-            socket.emit('leave', { guild_id: currentGuildId });
-        }
+        safeEmit('leave', { guild_id: currentGuildId });
+
         currentGuildId = String(guildId);
         isWorldMap = false;
 
-        // Transfer to MAP002 then load tiles
         if ($gamePlayer) {
             $gamePlayer.reserveTransfer(MAP_SPACE, 11, 11, 8, 0);
             $gamePlayer.requestMapReload();
         }
         fetchMapData();
-        if (socket && socket.connected) {
-            socket.emit('join', { guild_id: currentGuildId });
-        }
+        // 'join' 會在 onMapLoaded 中自動發送
     }
 
     // --- Initialization ---
+    PluginManager.registerCommand(PLUGIN_NAME, "InitializeSDK", function (args) {
+        initDiscordSDK(Number(args.switchId));
+    });
 
-    const _Scene_Boot_start = Scene_Boot.prototype.start;
-    Scene_Boot.prototype.start = function () {
-        _Scene_Boot_start.call(this);
-        initDiscordSDK();
-    };
+    PluginManager.registerCommand(PLUGIN_NAME, "TransferToTarget", function () {
+        decideMapToLoad();
+    });
 
     const _Scene_Map_onMapLoaded = Scene_Map.prototype.onMapLoaded;
     Scene_Map.prototype.onMapLoaded = function () {
         _Scene_Map_onMapLoaded.call(this);
 
-        // Apply space tiles if any
         applySpaceTiles();
 
-        // Reattach remote player sprites on new spriteset
-        refreshRemotePlayerSprites();
+        // 清除舊地圖殘留的遠端玩家資料
+        otherPlayers = {};
+
+        // 非忽略地圖自動加入房間（伺服器會回傳 room_state 重新生成玩家）
+        if (!isIgnoredMap() && currentGuildId) {
+            safeEmit('join', { guild_id: currentGuildId });
+        }
     };
 
     // --- Input Handling for Editor ---
     const _Scene_Map_update = Scene_Map.prototype.update;
     Scene_Map.prototype.update = function () {
         _Scene_Map_update.call(this);
+
+        // 等待使用者輸入（初始化後的「點擊以繼續」）
+        if (_pendingInputCallback && (Input.isTriggered('ok') || TouchInput.isTriggered())) {
+            const cb = _pendingInputCallback;
+            _pendingInputCallback = null;
+            cb();
+        }
 
         if (isEditMode && !isWorldMap) {
             this.updateEditorInput();
@@ -881,16 +926,13 @@
         // Use OcRam API
         $gameMap.setNormalTile(x, y, currentZ, currentTileId);
 
-        // Emit (align with backend event name)
-        if (socket) {
-            socket.emit('edit_map', {
-                guild_id: currentGuildId,
-                x: x,
-                y: y,
-                z: currentZ,
-                tile_id: currentTileId
-            });
-        }
+        safeEmit('edit_map', {
+            guild_id: currentGuildId,
+            x: x,
+            y: y,
+            z: currentZ,
+            tile_id: currentTileId
+        });
     };
 
     Scene_Map.prototype.pickTile = function (x, y) {
