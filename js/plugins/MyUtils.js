@@ -10,6 +10,34 @@
  * @arg switchId
  * @type switch
  *
+ * @command cacheSe
+ * @text Cache SE
+ * @desc Preload one sound effect in audio/se for smoother first playback
+ *
+ * @arg seName
+ * @text SE File
+ * @type file
+ * @dir audio/se
+ * @desc File name in audio/se (without extension)
+ *
+ * @arg volume
+ * @type number
+ * @min 0
+ * @max 100
+ * @default 90
+ *
+ * @arg pitch
+ * @type number
+ * @min 50
+ * @max 150
+ * @default 100
+ *
+ * @arg pan
+ * @type number
+ * @min -100
+ * @max 100
+ * @default 0
+ *
  * @help MyUtils.js
  * This plugin provides some utility functions for RPG Maker MZ.
 */
@@ -23,6 +51,20 @@
         _waitingSwitch = Number(args.switchId);
         _waitFrames = 2; // 跳過 2 幀
         _anyKeyPressed = false;
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "cacheSe", (args) => {
+        const name = String(args.seName || "").trim();
+        if (!name) return;
+
+        const se = {
+            name,
+            volume: Number(args.volume || 90),
+            pitch: Number(args.pitch || 100),
+            pan: Number(args.pan || 0)
+        };
+
+        AudioManager.loadStaticSe(se);
     });
 
     let _anyKeyPressed = false;
