@@ -26,6 +26,14 @@
  * @text 離開空間
  * @desc 離開目前連線的空間並回到世界地圖（MAP001）。
  *
+ * @command ShowOnlinePlayers
+ * @text 顯示線上玩家
+ * @desc 顯示目前房間中的其他線上玩家。
+ *
+ * @command HideOnlinePlayers
+ * @text 隱藏線上玩家
+ * @desc 隱藏目前房間中的其他線上玩家。
+ *
  * @help DiscordExplore.js
  *
  * This plugin integrates with the Discord Explore backend.
@@ -40,7 +48,7 @@
     const MAP_WAIT  = 3; // 等待室 / 起始地圖
 
     // 不加入任何房間的地圖 ID（等待室、過場動畫等）
-    const IGNORED_MAPS = [3, 5];
+    const IGNORED_MAPS = [3, 4, 5, 6, 7, 8, 9, 1];
 
     // State
     let discordSdk = null;
@@ -50,6 +58,8 @@
     let currentGuildId = null;
     let isWorldMap = false;
     let otherPlayers = {}; // userId -> { character: Game_Character, sprite: Sprite_Character|null, skin_id: string|null }
+    let remotePlayerStates = {}; // userId -> latest server snapshot
+    let onlinePlayersVisible = true;
     let clientId = null;
     let lastX = -1;
     let lastY = -1;
@@ -260,34 +270,40 @@
         socket.on('room_state', (data) => {
             // data: { guild_id, players: [...] }
             if (!data || String(data.guild_id) !== String(currentGuildId)) return;
-            clearOtherPlayers();
             const players = Array.isArray(data.players) ? data.players : [];
-            for (const p of players) spawnPlayer(p);
+            replaceRemotePlayerStates(players);
+            syncVisiblePlayersFromState();
         });
 
         socket.on('user_joined', (data) => {
             console.log("User joined:", data);
-            spawnPlayer(data);
+            const player = upsertRemotePlayerState(data);
+            if (onlinePlayersVisible && player) spawnPlayer(player);
         });
 
         socket.on('user_left', (data) => {
             console.log("User left:", data);
             const uid = data && (data.user_id ?? data.id);
-            if (uid != null) removePlayer(String(uid));
+            if (uid != null) {
+                removeRemotePlayerState(uid);
+                removePlayer(String(uid));
+            }
         });
 
         socket.on('user_moved', (data) => {
-            movePlayer(data);
+            const player = upsertRemotePlayerState(data);
+            if (onlinePlayersVisible && player) movePlayer(player);
         });
 
         socket.on('skin_changed', (data) => {
             // data: { guild_id, user_id, skin_id }
             if (!data || String(data.guild_id) !== String(currentGuildId)) return;
-            const uid = String(data.user_id);
-            if (!uid || (myUserId && uid === String(myUserId))) return;
+            const player = upsertRemotePlayerState(data);
+            if (!onlinePlayersVisible || !player) return;
+            const uid = player.user_id;
             const entry = otherPlayers[uid];
             if (!entry) return;
-            entry.skin_id = data.skin_id != null ? String(data.skin_id) : null;
+            entry.skin_id = player.skin_id;
             applySkinToCharacter(entry.character, entry.skin_id);
         });
 
@@ -324,6 +340,14 @@
 
     PluginManager.registerCommand(PLUGIN_NAME, "LeaveSpace", function () {
         leaveSpace();
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "ShowOnlinePlayers", function () {
+        showOnlinePlayers();
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "HideOnlinePlayers", function () {
+        hideOnlinePlayers();
     });
 
     function leaveSpace() {
@@ -440,6 +464,78 @@
         return { characterName: img.characterName, characterIndex: img.characterIndex };
     }
 
+    function applySkinToCharacter(character, skinId) {
+        if (!character) return;
+        const { characterName, characterIndex } = getCharacter(skinId);
+        character.setImage(characterName, characterIndex);
+    }
+
+    function normalizeRemotePlayerState(user, fallback = {}) {
+        if (!user && !fallback) return null;
+        const uid = (user && (user.user_id ?? user.id)) ?? fallback.user_id ?? fallback.id;
+        if (uid == null) return null;
+
+        return {
+            user_id: String(uid),
+            id: String(uid),
+            name: (user && user.name) ?? fallback.name ?? null,
+            skin_id: user && user.skin_id != null ? String(user.skin_id) : (fallback.skin_id ?? null),
+            x: Number((user && user.x) ?? fallback.x ?? 11),
+            y: Number((user && user.y) ?? fallback.y ?? 11),
+            direction: user && user.direction != null ? Number(user.direction) : (fallback.direction ?? null),
+            moveSpeed: (user && user.moveSpeed) ?? fallback.moveSpeed ?? null,
+            moveFrequency: (user && user.moveFrequency) ?? fallback.moveFrequency ?? null,
+        };
+    }
+
+    function upsertRemotePlayerState(user) {
+        const existing = user ? remotePlayerStates[String(user.user_id ?? user.id)] : null;
+        const normalized = normalizeRemotePlayerState(user, existing || {});
+        if (!normalized) return null;
+        if (myUserId && normalized.user_id === String(myUserId)) return null;
+        remotePlayerStates[normalized.user_id] = normalized;
+        return normalized;
+    }
+
+    function replaceRemotePlayerStates(players) {
+        const nextStates = {};
+        for (const player of players) {
+            const normalized = normalizeRemotePlayerState(player);
+            if (!normalized) continue;
+            if (myUserId && normalized.user_id === String(myUserId)) continue;
+            nextStates[normalized.user_id] = normalized;
+        }
+        remotePlayerStates = nextStates;
+    }
+
+    function removeRemotePlayerState(userId) {
+        if (userId == null) return;
+        delete remotePlayerStates[String(userId)];
+    }
+
+    function syncVisiblePlayersFromState() {
+        clearOtherPlayers();
+        if (!onlinePlayersVisible) return;
+        for (const userId of Object.keys(remotePlayerStates)) {
+            spawnPlayer(remotePlayerStates[userId]);
+        }
+    }
+
+    function showOnlinePlayers() {
+        onlinePlayersVisible = true;
+        syncVisiblePlayersFromState();
+        if (!isIgnoredMap() && currentGuildId && Object.keys(remotePlayerStates).length === 0) {
+            safeEmit('join', { guild_id: currentGuildId });
+        }
+        HintBar.show("已顯示線上玩家");
+    }
+
+    function hideOnlinePlayers() {
+        onlinePlayersVisible = false;
+        clearOtherPlayers();
+        HintBar.show("已隱藏線上玩家");
+    }
+
     function attachSpriteForUserId(userId) {
         const entry = otherPlayers[userId];
         if (!entry || entry.sprite) return;
@@ -467,11 +563,13 @@
     function clearOtherPlayers() {
         for (const uid of Object.keys(otherPlayers)) {
             const entry = otherPlayers[uid];
-            if (!entry) continue;
-            if ($gameMap._events[entry.character['_eventId']] === undefined) {
+            if (!entry) {
+                delete otherPlayers[uid];
                 continue;
             }
-            $gameMap.eraseEvent(entry.character['_eventId']);
+            if ($gameMap && entry.character && $gameMap._events[entry.character['_eventId']] !== undefined) {
+                $gameMap.eraseEvent(entry.character['_eventId']);
+            }
             // detachSpriteForUserId(uid);
             delete otherPlayers[uid];
         }
@@ -550,6 +648,7 @@
         if (uid == null) return;
         const userId = String(uid);
         if (myUserId && userId === String(myUserId)) return; // Don't spawn self
+        if (!onlinePlayersVisible) return;
 
         const x = Number(user.x ?? 11);
         const y = Number(user.y ?? 11);
@@ -583,6 +682,7 @@
         if (uid == null) return;
         const userId = String(uid);
         if (myUserId && userId === String(myUserId)) return;
+        if (!onlinePlayersVisible) return;
 
         // 確保玩家存在
         if (!otherPlayers[userId]) {
@@ -605,11 +705,11 @@
 
     function removePlayer(userId) {
         if (!userId) return;
-        entry = otherPlayers[userId];
-        if ($gameMap._events[entry.character['_eventId']] === undefined) {
-            return;
+        const entry = otherPlayers[userId];
+        if (!entry) return;
+        if ($gameMap && entry.character && $gameMap._events[entry.character['_eventId']] !== undefined) {
+            $gameMap.eraseEvent(entry.character['_eventId']);
         }
-        $gameMap.eraseEvent(entry.character['_eventId']);
         // detachSpriteForUserId(userId);
         delete otherPlayers[userId];
     }
@@ -872,6 +972,7 @@
 
         // 清除舊地圖殘留的遠端玩家資料
         otherPlayers = {};
+        remotePlayerStates = {};
 
         // 非忽略地圖自動加入房間（伺服器會回傳 room_state 重新生成玩家）
         if (!isIgnoredMap() && currentGuildId) {
