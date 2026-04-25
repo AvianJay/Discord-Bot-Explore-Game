@@ -34,6 +34,14 @@
  * @text 隱藏線上玩家
  * @desc 隱藏目前房間中的其他線上玩家。
  *
+ * @command SaveData
+ * @text 保存存檔
+ * @desc 保存目前地圖位置與白名單中的開關、變數。
+ *
+ * @command LoadData
+ * @text 載入存檔
+ * @desc 載入已保存的地圖位置與白名單中的開關、變數。
+ *
  * @help DiscordExplore.js
  *
  * This plugin integrates with the Discord Explore backend.
@@ -49,6 +57,18 @@
 
     // 不加入任何房間的地圖 ID（等待室、過場動畫等）
     const IGNORED_MAPS = [3, 4, 5, 6, 7, 8, 9, 1];
+    const SAVE_DATA_API_PATH = "/api/explore/me/save-data";
+    const DEFAULT_LOAD_MAP_ID = 5;
+    const DEFAULT_LOAD_X = 8;
+    const DEFAULT_LOAD_Y = 27;
+    const LOAD_TINT_TONE = [0, 0, 0, 0];
+    const LOAD_TINT_DURATION = 180;
+    const SAVABLE_SWITCH_IDS = [
+        3, 4
+    ];
+    const SAVABLE_VARIABLE_IDS = [
+        // Add variable IDs here, for example: 1, 2, 3
+    ];
 
     // State
     let discordSdk = null;
@@ -68,6 +88,7 @@
     let myUserId = null;
     let myName = null;
     let pendingSpaceTiles = null; // [{x,y,z,tile_id}]
+    let pendingLoadedSaveContext = null;
 
     // Editor State
     let isEditMode = false;
@@ -108,6 +129,52 @@
     function isIgnoredMap() {
         return $gameMap && IGNORED_MAPS.includes($gameMap.mapId());
     }
+
+    function showHint(message) {
+        if (typeof HintBar !== "undefined" && HintBar && typeof HintBar.show === "function") {
+            HintBar.show(String(message));
+        } else {
+            console.log(`[Explore] ${message}`);
+        }
+    }
+
+    function normalizeSavableIdList(ids) {
+        const normalized = [];
+        const seen = new Set();
+        for (const rawId of Array.isArray(ids) ? ids : []) {
+            const id = Number(rawId);
+            if (!Number.isInteger(id) || id <= 0 || seen.has(id)) continue;
+            seen.add(id);
+            normalized.push(id);
+        }
+        return normalized;
+    }
+
+    function toSaveInteger(value) {
+        const number = Number(value);
+        return Number.isInteger(number) ? number : null;
+    }
+
+    function applyLoadTint() {
+        if ($gameScreen && typeof $gameScreen.startTint === "function") {
+            $gameScreen.startTint(LOAD_TINT_TONE.slice(), LOAD_TINT_DURATION);
+        }
+    }
+
+    function makeDefaultLoadSaveData() {
+        return {
+            map_id: DEFAULT_LOAD_MAP_ID,
+            x: DEFAULT_LOAD_X,
+            y: DEFAULT_LOAD_Y,
+            guild_id: null,
+            is_world_map: false,
+            switches: {},
+            variables: {},
+        };
+    }
+
+    const ALLOWED_SAVE_SWITCH_IDS = normalizeSavableIdList(SAVABLE_SWITCH_IDS);
+    const ALLOWED_SAVE_VARIABLE_IDS = normalizeSavableIdList(SAVABLE_VARIABLE_IDS);
 
     // --- Discord SDK Setup ---
     async function initDiscordSDK(switchId) {
@@ -350,6 +417,14 @@
         hideOnlinePlayers();
     });
 
+    PluginManager.registerCommand(PLUGIN_NAME, "SaveData", function () {
+        saveExploreSaveData();
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "LoadData", function () {
+        loadExploreSaveData();
+    });
+
     function leaveSpace() {
         safeEmit('leave', { guild_id: currentGuildId });
 
@@ -364,6 +439,180 @@
 
         fetchMapData();
         // 'join' 會在 onMapLoaded 中自動發送
+    }
+
+    function collectSavableSwitches() {
+        const snapshot = {};
+        if (!$gameSwitches) return snapshot;
+
+        for (const switchId of ALLOWED_SAVE_SWITCH_IDS) {
+            snapshot[String(switchId)] = !!$gameSwitches.value(switchId);
+        }
+        return snapshot;
+    }
+
+    function collectSavableVariables() {
+        const snapshot = {};
+        if (!$gameVariables) return snapshot;
+
+        for (const variableId of ALLOWED_SAVE_VARIABLE_IDS) {
+            const value = $gameVariables.value(variableId);
+            snapshot[String(variableId)] = value === undefined ? null : value;
+        }
+        return snapshot;
+    }
+
+    function buildExploreSavePayload() {
+        if (!$gamePlayer || !$gameMap) return null;
+
+        return {
+            map_id: Number($gameMap.mapId()),
+            x: Number($gamePlayer.x),
+            y: Number($gamePlayer.y),
+            guild_id: currentGuildId != null ? String(currentGuildId) : null,
+            is_world_map: !!isWorldMap,
+            switches: collectSavableSwitches(),
+            variables: collectSavableVariables(),
+        };
+    }
+
+    function applySavedSwitches(savedSwitches) {
+        if (!$gameSwitches || !savedSwitches || typeof savedSwitches !== "object") return;
+
+        for (const switchId of ALLOWED_SAVE_SWITCH_IDS) {
+            const key = String(switchId);
+            if (!Object.prototype.hasOwnProperty.call(savedSwitches, key)) continue;
+            $gameSwitches.setValue(switchId, !!savedSwitches[key]);
+        }
+    }
+
+    function applySavedVariables(savedVariables) {
+        if (!$gameVariables || !savedVariables || typeof savedVariables !== "object") return;
+
+        for (const variableId of ALLOWED_SAVE_VARIABLE_IDS) {
+            const key = String(variableId);
+            if (!Object.prototype.hasOwnProperty.call(savedVariables, key)) continue;
+            $gameVariables.setValue(variableId, savedVariables[key]);
+        }
+    }
+
+    function resolveLoadedSaveContext(saveData, mapId) {
+        if (mapId === MAP_WORLD) {
+            return { mapId, guildId: "world", isWorldMap: true };
+        }
+
+        if (mapId === MAP_SPACE) {
+            const savedGuildId = saveData && saveData.guild_id != null ? String(saveData.guild_id) : null;
+            const activeGuildId = currentGuildId != null ? String(currentGuildId) : null;
+            const guildId = savedGuildId && savedGuildId !== "world"
+                ? savedGuildId
+                : (activeGuildId && activeGuildId !== "world" ? activeGuildId : null);
+            if (guildId) {
+                return { mapId, guildId, isWorldMap: false };
+            }
+        }
+
+        return null;
+    }
+
+    function applySavedLocation(saveData) {
+        if (!$gamePlayer) return false;
+
+        const mapId = toSaveInteger(saveData && saveData.map_id);
+        const x = toSaveInteger(saveData && saveData.x);
+        const y = toSaveInteger(saveData && saveData.y);
+        if (!mapId || x === null || y === null) return false;
+
+        pendingSpaceTiles = null;
+        pendingLoadedSaveContext = resolveLoadedSaveContext(saveData, mapId);
+
+        if (pendingLoadedSaveContext) {
+            currentGuildId = pendingLoadedSaveContext.guildId;
+            isWorldMap = pendingLoadedSaveContext.isWorldMap;
+        } else {
+            currentGuildId = null;
+            isWorldMap = false;
+        }
+
+        $gamePlayer.reserveTransfer(mapId, x, y, $gamePlayer.direction(), 0);
+        $gamePlayer.requestMapReload();
+        return true;
+    }
+
+    async function saveExploreSaveData() {
+        try {
+            if (!exploreAuthToken) {
+                showHint("尚未連線 Explore，無法保存存檔");
+                return false;
+            }
+
+            const payload = buildExploreSavePayload();
+            if (!payload) {
+                showHint("目前無法取得玩家位置，無法保存存檔");
+                return false;
+            }
+
+            const response = await fetch(SAVE_DATA_API_PATH, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${exploreAuthToken}`,
+                },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                showHint(`保存失敗: ${data.error || response.statusText}`);
+                return false;
+            }
+
+            showHint("存檔已保存");
+            return true;
+        } catch (error) {
+            console.error("Failed to save explore data", error);
+            showHint(`保存失敗: ${error.message || error}`);
+            return false;
+        }
+    }
+
+    async function loadExploreSaveData() {
+        try {
+            if (!exploreAuthToken) {
+                showHint("尚未連線 Explore，無法載入存檔");
+                return false;
+            }
+
+            const response = await fetch(SAVE_DATA_API_PATH, {
+                headers: {
+                    "Authorization": `Bearer ${exploreAuthToken}`,
+                },
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                showHint(`載入失敗: ${data.error || response.statusText}`);
+                return false;
+            }
+
+            const saveData = data.has_save ? data : makeDefaultLoadSaveData();
+
+            applySavedSwitches(saveData.switches);
+            applySavedVariables(saveData.variables);
+            const moved = applySavedLocation(saveData);
+            applyLoadTint();
+
+            if (data.has_save) {
+                showHint(moved ? "存檔已載入" : "存檔已載入（未移動位置）");
+            } else {
+                showHint(moved ? "沒有存檔，已移動到預設位置" : "沒有存檔，已套用預設位置");
+            }
+            return true;
+        } catch (error) {
+            console.error("Failed to load explore data", error);
+            showHint(`載入失敗: ${error.message || error}`);
+            return false;
+        }
     }
 
     function decideMapToLoad() {
@@ -967,6 +1216,13 @@
     const _Scene_Map_onMapLoaded = Scene_Map.prototype.onMapLoaded;
     Scene_Map.prototype.onMapLoaded = function () {
         _Scene_Map_onMapLoaded.call(this);
+
+        if (pendingLoadedSaveContext && $gameMap && $gameMap.mapId() === pendingLoadedSaveContext.mapId) {
+            currentGuildId = pendingLoadedSaveContext.guildId;
+            isWorldMap = pendingLoadedSaveContext.isWorldMap;
+            fetchMapData();
+            pendingLoadedSaveContext = null;
+        }
 
         applySpaceTiles();
 
