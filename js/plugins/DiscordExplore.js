@@ -42,6 +42,38 @@
  * @text 載入存檔
  * @desc 載入已保存的地圖位置與白名單中的開關、變數。
  *
+ * @command FetchMusicState
+ * @text 取得音樂狀態
+ * @desc 向伺服器查詢目前播放的音樂資訊，並更新音樂播放器 UI。
+ *
+ * @command MusicAction
+ * @text 音樂控制
+ * @desc 控制音樂播放（next / pause / play / seek / recommend）。
+ *
+ * @arg action
+ * @type string
+ * @default pause
+ * @text 動作
+ * @desc next, pause, play, seek, recommend
+ *
+ * @arg data
+ * @type string
+ * @default
+ * @text 參數
+ * @desc seek 填秒數；recommend 填數量（1-10）；其餘留空。
+ *
+ * @command StopMusic
+ * @text 停止音樂
+ * @desc 停止目前播放的音樂並斷開語音頻道。
+ *
+ * @command ShowMusicPlayer
+ * @text 顯示音樂播放器
+ * @desc 顯示音樂播放器覆蓋 UI（右下角小視窗）。
+ *
+ * @command HideMusicPlayer
+ * @text 隱藏音樂播放器
+ * @desc 隱藏音樂播放器覆蓋 UI。
+ *
  * @help DiscordExplore.js
  *
  * This plugin integrates with the Discord Explore backend.
@@ -84,6 +116,11 @@
     let lastX = -1;
     let lastY = -1;
     let upTime = new Date();
+    let musicStatePollTimer = null;
+
+    // Music player state
+    let musicState = null;       // null | {title, author, thumbnail, url, current, playing, is_radio, is_paused, available}
+    let musicUiVisible = false;  // whether the drawer is expanded
 
     let myUserId = null;
     let myName = null;
@@ -257,6 +294,9 @@
             exploreAuthToken = tokenData.auth_token;
             console.log("Explore auth_token ready");
 
+            ensureMusicStatePolling();
+            fetchMusicState();
+
             try {
                 const meRes = await fetch('/api/explore/me', {
                     headers: { "Authorization": `Bearer ${exploreAuthToken}` }
@@ -328,6 +368,7 @@
             if (!isIgnoredMap() && currentGuildId) {
                 socket.emit('join', { guild_id: currentGuildId });
             }
+            fetchMusicState();
         });
 
         socket.on('joined', (data) => {
@@ -391,6 +432,230 @@
                 $gameMap.setNormalTile(data.x, data.y, data.z, Number(data.tile_id));
             }
         });
+
+        // Music events
+        socket.on('music_update', (data) => {
+            if (!data) return;
+            musicState = data;
+            _updateMusicOverlay();
+        });
+
+        socket.on('music_error', (data) => {
+            console.warn('[Music] error:', data && data.message);
+        });
+    }
+
+    // --- Music API & Player UI ---
+
+    /**
+     * Fetch current music state from the server.
+     * The server auto-detects which guild/voice-channel the caller is in;
+     * no guild_id is needed from the client side.
+     */
+    async function fetchMusicState() {
+        if (socket && socket.connected) {
+            socket.emit('music_get');
+            return;
+        }
+        if (!exploreAuthToken) return;
+        try {
+            const res = await fetch('/api/explore/music', {
+                headers: { 'Authorization': `Bearer ${exploreAuthToken}` }
+            });
+            if (res.status === 404) {
+                musicState = { playing: false, available: false };
+                _updateMusicOverlay();
+                return;
+            }
+            if (res.ok) {
+                const data = await res.json();
+                musicState = data;
+                _updateMusicOverlay();
+            }
+        } catch (e) {
+            console.error('[Music] fetchMusicState failed:', e);
+        }
+    }
+
+    function ensureMusicStatePolling() {
+        if (musicStatePollTimer != null) return;
+        musicStatePollTimer = window.setInterval(() => {
+            if (!exploreAuthToken) return;
+            fetchMusicState();
+        }, 5000);
+    }
+
+    /**
+     * Send a music control action.
+     * Prefers Socket.IO (server verifies voice-channel); falls back to REST PATCH.
+     * @param {string} action  next | pause | play | seek | recommend
+     * @param {*}      [data]  seek=seconds, recommend=count, others=null
+     */
+    function musicAction(action, data = null) {
+        if (socket && socket.connected) {
+            // Server auto-detects guild from caller's voice channel — no guild_id needed
+            socket.emit('music_action', { action, data });
+            return;
+        }
+        if (!exploreAuthToken) return;
+        fetch('/api/explore/music', {
+            method: 'PATCH',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${exploreAuthToken}`
+            },
+            body: JSON.stringify({ action, data })
+        }).then(res => { if (res.ok) fetchMusicState(); })
+          .catch(e => console.error('[Music] action failed:', e));
+    }
+
+    /** Stop music via REST DELETE (server auto-detects guild from caller's voice channel). */
+    async function stopMusic() {
+        if (!exploreAuthToken) return;
+        try {
+            await fetch('/api/explore/music', {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${exploreAuthToken}` }
+            });
+            musicState = null;
+            _updateMusicOverlay();
+        } catch (e) {
+            console.error('[Music] stopMusic failed:', e);
+        }
+    }
+
+    function _musicLauncherIcon() {
+        return musicState && musicState.thumbnail ? String(musicState.thumbnail) : '';
+    }
+
+    function _shouldShowMusicLauncher() {
+        return !!(musicState && musicState.available);
+    }
+
+    /** Create the music overlay DOM element if it doesn't exist yet. */
+    function _ensureMusicOverlayDOM() {
+        if (document.getElementById('explore-music-shell')) return;
+        const shell = document.createElement('div');
+        shell.id = 'explore-music-shell';
+        shell.style.cssText = [
+            'position:fixed', 'left:14px', 'bottom:14px',
+            'z-index:9999', 'display:none',
+            'pointer-events:none', 'font-family:sans-serif',
+            'user-select:none'
+        ].join(';');
+        shell.innerHTML = `
+<div id="explore-music-overlay" style="position:relative;width:300px;max-width:calc(100vw - 28px);background:linear-gradient(135deg, rgba(12,18,30,0.96), rgba(27,38,60,0.92));color:#fff;border-radius:18px;padding:14px 14px 12px 14px;box-shadow:0 18px 38px rgba(0,0,0,0.42);backdrop-filter:blur(10px);transform:translateX(calc(-100% - 12px));opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:auto;border:1px solid rgba(255,255,255,0.09)">
+  <div id="emp-info" style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <img id="emp-thumb" src="" style="width:46px;height:46px;border-radius:10px;object-fit:cover;display:none;flex-shrink:0;box-shadow:0 6px 16px rgba(0,0,0,0.28)"/>
+    <div id="emp-fallback-icon" style="width:46px;height:46px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:rgba(255,255,255,0.11);font-size:22px">🎵</div>
+    <div style="overflow:hidden;min-width:0">
+      <div id="emp-title" style="font-weight:700;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3"></div>
+      <div id="emp-author" style="opacity:0.68;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px"></div>
+    </div>
+  </div>
+  <div style="display:flex;gap:6px;justify-content:flex-start;align-items:center">
+    <button id="emp-btn-play" title="Play / Pause" style="background:rgba(255,255,255,0.16);border:none;color:#fff;border-radius:8px;padding:6px 11px;cursor:pointer;font-size:13px">▶</button>
+    <button id="emp-btn-next" title="Next" style="background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:8px;padding:6px 11px;cursor:pointer;font-size:13px">⏭</button>
+    <button id="emp-btn-stop" title="Stop" style="background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:8px;padding:6px 11px;cursor:pointer;font-size:13px">⏹</button>
+    <button id="emp-btn-rec" title="Recommend×5" style="background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:8px;padding:6px 11px;cursor:pointer;font-size:13px">🎯</button>
+  </div>
+</div>
+<button id="explore-music-toggle" title="Music Player" style="position:absolute;left:0;bottom:0;width:52px;height:52px;border:none;border-radius:16px;background:linear-gradient(135deg, rgba(255,255,255,0.2), rgba(92,169,255,0.26));box-shadow:0 14px 28px rgba(0,0,0,0.3);cursor:pointer;pointer-events:auto;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0;transition:transform 220ms ease, border-radius 220ms ease, box-shadow 220ms ease;border:1px solid rgba(255,255,255,0.12)">
+  <img id="emp-toggle-thumb" src="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:none"/>
+  <span id="emp-toggle-icon" style="position:relative;font-size:22px;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.35)">🎵</span>
+</button>`;
+        document.body.appendChild(shell);
+
+        document.getElementById('emp-btn-play').onclick = () => {
+            musicState && musicState.is_paused ? musicAction('play') : musicAction('pause');
+        };
+        document.getElementById('emp-btn-next').onclick = () => musicAction('next');
+        document.getElementById('emp-btn-stop').onclick = () => stopMusic();
+        document.getElementById('emp-btn-rec').onclick = () => musicAction('recommend', 5);
+        document.getElementById('emp-title').onclick = () => {
+            if (!musicState || !musicState.playing || !musicState.url) return;
+            if (discordSdk && discordSdk.commands && typeof discordSdk.commands.openExternalLink === 'function') {
+                discordSdk.commands.openExternalLink({ url: musicState.url }).catch(e => {
+                    console.warn('[Music] openExternalLink failed:', e);
+                });
+            } else {
+                // Dev mode fallback
+                window.open(musicState.url, '_blank', 'noopener,noreferrer');
+            }
+        };
+        document.getElementById('explore-music-toggle').onclick = () => {
+            musicUiVisible = !musicUiVisible;
+            if (musicUiVisible) fetchMusicState();
+            _updateMusicOverlay();
+        };
+    }
+
+    /** Refresh the music overlay display based on current musicState. */
+    function _updateMusicOverlay() {
+        _ensureMusicOverlayDOM();
+        const shell = document.getElementById('explore-music-shell');
+        const drawer = document.getElementById('explore-music-overlay');
+        const launcher = document.getElementById('explore-music-toggle');
+        const titleEl = document.getElementById('emp-title');
+        const authorEl = document.getElementById('emp-author');
+        const thumbEl = document.getElementById('emp-thumb');
+        const fallbackEl = document.getElementById('emp-fallback-icon');
+        const playBtn = document.getElementById('emp-btn-play');
+        const toggleThumb = document.getElementById('emp-toggle-thumb');
+        const toggleIcon = document.getElementById('emp-toggle-icon');
+        if (!shell || !drawer || !launcher) return;
+
+        if (!_shouldShowMusicLauncher()) {
+            shell.style.display = 'none';
+            musicUiVisible = false;
+            return;
+        }
+
+        shell.style.display = 'block';
+        drawer.style.transform = musicUiVisible ? 'translateX(0)' : 'translateX(calc(-100% - 12px))';
+        drawer.style.opacity = musicUiVisible ? '1' : '0';
+        launcher.style.transform = musicUiVisible ? 'translateX(248px) scale(0.98)' : 'translateX(0) scale(1)';
+        launcher.style.borderRadius = musicUiVisible ? '14px' : '16px';
+        launcher.style.boxShadow = musicUiVisible
+            ? '0 16px 30px rgba(0,0,0,0.38)'
+            : '0 14px 28px rgba(0,0,0,0.3)';
+
+        if (titleEl) {
+            titleEl.textContent = musicState.playing ? (musicState.title || 'Unknown') : 'Voice Ready';
+            const hasLink = musicState.playing && !!musicState.url;
+            titleEl.style.cursor = hasLink ? 'pointer' : 'default';
+            titleEl.style.textDecoration = hasLink ? 'underline dotted rgba(255,255,255,0.35)' : 'none';
+            titleEl.title = hasLink ? musicState.url : '';
+        }
+        if (authorEl) authorEl.textContent = musicState.playing ? (musicState.author || '') : 'Open player controls';
+        if (thumbEl) {
+            if (musicState.thumbnail) {
+                thumbEl.src = musicState.thumbnail;
+                thumbEl.style.display = '';
+                if (fallbackEl) fallbackEl.style.display = 'none';
+            } else {
+                thumbEl.style.display = 'none';
+                if (fallbackEl) fallbackEl.style.display = 'flex';
+            }
+        }
+        const launcherIcon = _musicLauncherIcon();
+        if (toggleThumb) {
+            if (launcherIcon) {
+                toggleThumb.src = launcherIcon;
+                toggleThumb.style.display = 'block';
+                if (toggleIcon) toggleIcon.style.opacity = '0';
+            } else {
+                toggleThumb.style.display = 'none';
+                if (toggleIcon) toggleIcon.style.opacity = '1';
+            }
+        }
+        if (playBtn) playBtn.textContent = musicState.is_paused ? '▶' : '⏸';
+    }
+
+    /** Hide the overlay element without changing musicUiVisible. */
+    function _hideMusicOverlay() {
+        musicUiVisible = false;
+        _updateMusicOverlay();
     }
 
     // --- Plugin Commands (RPG Maker MZ) ---
@@ -423,6 +688,30 @@
 
     PluginManager.registerCommand(PLUGIN_NAME, "LoadData", function () {
         loadExploreSaveData();
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "FetchMusicState", function () {
+        fetchMusicState();
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "MusicAction", function (args) {
+        const raw = args.data != null ? String(args.data).trim() : null;
+        const parsed = raw && raw !== '' ? (isNaN(raw) ? raw : Number(raw)) : null;
+        musicAction(String(args.action || 'pause'), parsed);
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "StopMusic", function () {
+        stopMusic();
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "ShowMusicPlayer", function () {
+        musicUiVisible = true;
+        fetchMusicState();  // always refresh; server auto-detects voice channel
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "HideMusicPlayer", function () {
+        musicUiVisible = false;
+        _hideMusicOverlay();
     });
 
     function leaveSpace() {
@@ -1095,7 +1384,9 @@
             const server = this._listWindow.serverAt(this._listWindow.index());
             if (!server) return;
             connectToSpace(server.id);
-            this.popScene();
+            // 清除場景堆疊，直接回到地圖場景以觸發地圖轉移
+            SceneManager._stack.length = 0;
+            SceneManager.goto(Scene_Map);
         }
     }
 
