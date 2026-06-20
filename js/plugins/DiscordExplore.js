@@ -175,6 +175,31 @@
         }
     }
 
+    function openInviteLink(url) {
+        const inviteUrl = String(url || "").trim();
+        if (!inviteUrl) return false;
+        if (discordSdk && discordSdk.commands && typeof discordSdk.commands.openExternalLink === 'function') {
+            discordSdk.commands.openExternalLink({ url: inviteUrl }).catch(e => {
+                console.warn('[Explore] openExternalLink failed:', e);
+                window.open(inviteUrl, '_blank', 'noopener,noreferrer');
+            });
+            return true;
+        }
+        window.open(inviteUrl, '_blank', 'noopener,noreferrer');
+        return true;
+    }
+
+    function handleMembershipRequired(server) {
+        const inviteLink = server && server.invite_link ? String(server.invite_link) : "";
+        if (inviteLink) {
+            showHint("需要先加入伺服器，正在開啟邀請連結");
+            openInviteLink(inviteLink);
+        } else {
+            showHint("需要先加入伺服器才能進入");
+            alert("You must join this server to enter!");
+        }
+    }
+
     function normalizeSavableIdList(ids) {
         const normalized = [];
         const seen = new Set();
@@ -418,8 +443,7 @@
         socket.on('error', (data) => {
             console.error("Socket error:", data);
             if (data.message === 'Membership required') {
-                alert("You must join this server to enter!");
-                // Logic to kick user back to world map
+                handleMembershipRequired(data);
                 currentGuildId = 'world';
                 isWorldMap = true;
                 decideMapToLoad();
@@ -1383,6 +1407,10 @@
         onOk() {
             const server = this._listWindow.serverAt(this._listWindow.index());
             if (!server) return;
+            if (server.require_join && !server.is_member) {
+                handleMembershipRequired(server);
+                return;
+            }
             connectToSpace(server.id);
             // 清除場景堆疊，直接回到地圖場景以觸發地圖轉移
             SceneManager._stack.length = 0;
