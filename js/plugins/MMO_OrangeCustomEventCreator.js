@@ -356,11 +356,12 @@
      return this.createNormalEventAt($gameActors.actor(actorId).characterName(), $gameActors.actor(actorId).characterIndex(), x, y, d, scriptOrCommonEventId, temporary);
    }
  
-   function createNormalEventAt(characterName, characterIndex, x, y, d, scriptOrCommonEventId, temporary, _pages, uniqueId, selectedPage) {
-     var eventData = new CustomEventData();
-     eventData.page.image.direction = d;
-     eventData.page.image.characterName = characterName;
-     eventData.page.image.characterIndex = characterIndex;
+    function createNormalEventAt(characterName, characterIndex, x, y, d, scriptOrCommonEventId, temporary, _pages, uniqueId, selectedPage) {
+      var eventData = new CustomEventData();
+      eventData.note = "";
+      eventData.page.image.direction = d;
+      eventData.page.image.characterName = characterName;
+      eventData.page.image.characterIndex = characterIndex;
      if (uniqueId) eventData.uniqueId = uniqueId;
      if (_pages && _pages[0]) {
       Object.assign(eventData.page.conditions, _pages[0].conditions);

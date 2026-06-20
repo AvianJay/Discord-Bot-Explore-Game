@@ -1319,6 +1319,14 @@
             this.refresh();
         }
 
+        maxCols() {
+            return 1;
+        }
+
+        itemHeight() {
+            return 76;
+        }
+
         setServers(servers) {
             this._servers = servers || [];
             this.refresh();
@@ -1333,32 +1341,125 @@
             return this._servers[index];
         }
 
+        drawAllItems() {
+            this.drawHeader();
+            Window_Selectable.prototype.drawAllItems.call(this);
+        }
+
+        drawHeader() {
+            const width = this.innerWidth - this.itemPadding() * 2;
+            this.contents.fontSize = 28;
+            this.changeTextColor(ColorManager.systemColor());
+            this.drawText("選擇伺服器", this.itemPadding(), 22, width, "center");
+            this.resetTextColor();
+            this.contents.fontSize = 18;
+            this.contents.paintOpacity = 180;
+            this.drawText("要去哪個伺服器玩？", this.itemPadding(), 58, width, "center");
+            this.contents.paintOpacity = 255;
+            this.resetFontSettings();
+        }
+
+        itemRect(index) {
+            const rect = Window_Selectable.prototype.itemRect.call(this, index);
+            rect.y += 94;
+            rect.height = this.itemHeight() - 6;
+            return rect;
+        }
+
         drawItem(index) {
             const server = this.serverAt(index);
             if (!server) return;
             const rect = this.itemRectWithPadding(index);
+            const iconSize = 48;
+            const badgeWidth = 120;
+            const infoX = rect.x + iconSize + 18;
+            const textWidth = Math.max(0, rect.width - (iconSize + badgeWidth + 42));
 
-            // Draw icon if available (best-effort; may fail due to CORS)
-            let x = rect.x;
+            this.drawItemBackground(index);
+
+            this.contents.paintOpacity = 255;
+            this.contentsBack.gradientFillRect(
+                rect.x,
+                rect.y + 4,
+                rect.width,
+                rect.height - 8,
+                "rgba(20, 26, 40, 0.94)",
+                "rgba(10, 14, 24, 0.94)",
+                true
+            );
+            this.contentsBack.strokeRect(rect.x, rect.y + 4, rect.width, rect.height - 8, "rgba(255, 255, 255, 0.08)");
+
             if (server.icon_url) {
                 const bmp = this._loadUrlBitmap(server.icon_url);
                 if (bmp && bmp.isReady && bmp.isReady()) {
-                    const size = 32;
-                    this.contents.blt(bmp, 0, 0, bmp.width, bmp.height, x, rect.y + 2, size, size);
+                    this.contents.blt(
+                        bmp,
+                        0,
+                        0,
+                        bmp.width,
+                        bmp.height,
+                        rect.x + 6,
+                        rect.y + 10,
+                        iconSize,
+                        iconSize
+                    );
                 }
+            } else {
+                this.contentsBack.gradientFillRect(
+                    rect.x + 6,
+                    rect.y + 10,
+                    iconSize,
+                    iconSize,
+                    "rgba(78, 122, 255, 0.6)",
+                    "rgba(39, 62, 125, 0.6)",
+                    true
+                );
+                this.changeTextColor(ColorManager.systemColor());
+                this.contents.fontSize = 16;
+                this.drawText("NO", rect.x + 6, rect.y + 18, iconSize, "center");
+                this.drawText("ICON", rect.x + 6, rect.y + 34, iconSize, "center");
+                this.resetFontSettings();
             }
-            x += 36;
 
             const name = server.name || server.id;
-            const count = server.member_count ?? 0;
-            this.drawText(`${name} (${count})`, x, rect.y, rect.width - (x - rect.x));
+            const count = Number(server.member_count ?? 0);
+            const insideCount = Number(server.in_space_count ?? 0);
+            const statusText = server.require_join
+                ? (server.is_member ? "私人" : "需要加入伺服器")
+                : (server.is_public ? "公開" : "私人");
+            const audienceText = `${count} 位成員`;
+            const insideText = `${insideCount} 線上`;
+
+            this.contents.fontSize = 24;
+            this.resetTextColor();
+            this.drawText(name, infoX, rect.y + 8, textWidth, "left");
+
+            this.contents.fontSize = 16;
+            this.contents.paintOpacity = 180;
+            this.drawText(audienceText, infoX, rect.y + 36, Math.max(100, textWidth - 12), "left");
+            this.drawText(insideText, infoX + 108, rect.y + 36, Math.max(100, textWidth - 120), "left");
+            this.contents.paintOpacity = 255;
+
+            const badgeX = rect.x + rect.width - badgeWidth - 10;
+            const badgeY = rect.y + 13;
+            const badgeHeight = 24;
+            const badgeColor1 = server.require_join ? "rgba(255, 170, 64, 0.92)" : "rgba(72, 194, 134, 0.92)";
+            const badgeColor2 = server.require_join ? "rgba(183, 92, 21, 0.92)" : "rgba(18, 110, 93, 0.92)";
+            this.contents.gradientFillRect(badgeX, badgeY, badgeWidth, badgeHeight, badgeColor1, badgeColor2, false);
+            this.contents.strokeRect(badgeX, badgeY, badgeWidth, badgeHeight, "rgba(255, 255, 255, 0.14)");
+            this.contents.fontSize = 14;
+            this.changeTextColor("#ffffff");
+            this.contents.drawText(statusText, badgeX, badgeY, badgeWidth, badgeHeight, "center");
+            this.resetFontSettings();
         }
 
         _loadUrlBitmap(url) {
             if (!url) return null;
             if (!this._iconBitmaps[url]) {
                 try {
-                    this._iconBitmaps[url] = Bitmap.load(url);
+                    const bitmap = Bitmap.load(url);
+                    bitmap.addLoadListener(() => this.refresh());
+                    this._iconBitmaps[url] = bitmap;
                 } catch (e) {
                     this._iconBitmaps[url] = null;
                 }
@@ -1370,8 +1471,15 @@
     class Scene_ExploreServerList extends Scene_MenuBase {
         create() {
             super.create();
-            this.createWindowLayer();
-            const rect = new Rectangle(0, 0, Graphics.boxWidth, Graphics.boxHeight);
+            const topInset = Math.max(this.buttonAreaBottom() + 8, 60);
+            const sideInset = 28;
+            const bottomInset = 24;
+            const rect = new Rectangle(
+                sideInset,
+                topInset,
+                Graphics.boxWidth - sideInset * 2,
+                Graphics.boxHeight - topInset - bottomInset
+            );
             this._listWindow = new Window_ExploreServerList(rect);
             this._listWindow.setHandler('ok', this.onOk.bind(this));
             this._listWindow.setHandler('cancel', this.popScene.bind(this));
