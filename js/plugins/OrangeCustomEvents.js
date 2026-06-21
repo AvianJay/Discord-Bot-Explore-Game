@@ -78,6 +78,10 @@ Game_Custom_Event.prototype.constructor = Game_Custom_Event;
   // Game_Custom_Event
   //----------------------------------------------
   Game_Custom_Event.prototype.initialize = function(mapId, eventId, eventData) {
+    eventData = eventData || {};
+    if (typeof eventData.note !== "string") {
+      eventData.note = eventData.note == null ? "" : String(eventData.note);
+    }
     this._eventData = eventData;
     Game_Event.prototype.initialize.call(this, mapId, eventId);
   };

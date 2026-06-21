@@ -167,6 +167,41 @@
         return $gameMap && IGNORED_MAPS.includes($gameMap.mapId());
     }
 
+    function getCurrentMapId() {
+        if (!$gameMap || typeof $gameMap.mapId !== "function") return null;
+        const mapId = Number($gameMap.mapId());
+        return Number.isInteger(mapId) && mapId > 0 ? mapId : null;
+    }
+
+    function normalizeRemoteMapId(value, fallback = null) {
+        const mapId = Number(value);
+        if (Number.isInteger(mapId) && mapId > 0) return mapId;
+        return fallback;
+    }
+
+    function buildJoinPayload() {
+        const payload = {
+            guild_id: currentGuildId
+        };
+        const mapId = getCurrentMapId();
+        if (mapId != null) {
+            payload.map_id = mapId;
+        }
+        if ($gamePlayer) {
+            payload.x = Number($gamePlayer.x);
+            payload.y = Number($gamePlayer.y);
+            payload.direction = Number($gamePlayer.direction());
+            payload.moveSpeed = $gamePlayer.realMoveSpeed();
+            payload.moveFrequency = $gamePlayer.moveFrequency();
+        }
+        return payload;
+    }
+
+    function emitJoinCurrentGuild() {
+        if (!currentGuildId || isIgnoredMap()) return;
+        safeEmit('join', buildJoinPayload());
+    }
+
     function showHint(message) {
         if (typeof HintBar !== "undefined" && HintBar && typeof HintBar.show === "function") {
             HintBar.show(String(message));
@@ -390,9 +425,7 @@
         socket.on('connect', () => {
             console.log("Socket connected");
             // 重連時自動重新加入房間（首次連線在等待室不加入）
-            if (!isIgnoredMap() && currentGuildId) {
-                socket.emit('join', { guild_id: currentGuildId });
-            }
+            emitJoinCurrentGuild();
             fetchMusicState();
         });
 
@@ -409,12 +442,19 @@
         });
 
         socket.on('user_joined', (data) => {
+            if (!data || String(data.guild_id) !== String(currentGuildId)) return;
             console.log("User joined:", data);
             const player = upsertRemotePlayerState(data);
-            if (onlinePlayersVisible && player) spawnPlayer(player);
+            if (!onlinePlayersVisible || !player) return;
+            if (isRemotePlayerOnCurrentMap(player)) {
+                spawnPlayer(player);
+            } else {
+                removePlayer(String(player.user_id));
+            }
         });
 
         socket.on('user_left', (data) => {
+            if (!data || String(data.guild_id) !== String(currentGuildId)) return;
             console.log("User left:", data);
             const uid = data && (data.user_id ?? data.id);
             if (uid != null) {
@@ -424,8 +464,14 @@
         });
 
         socket.on('user_moved', (data) => {
+            if (!data || String(data.guild_id) !== String(currentGuildId)) return;
             const player = upsertRemotePlayerState(data);
-            if (onlinePlayersVisible && player) movePlayer(player);
+            if (!onlinePlayersVisible || !player) return;
+            if (isRemotePlayerOnCurrentMap(player)) {
+                movePlayer(player);
+            } else {
+                removePlayer(String(player.user_id));
+            }
         });
 
         socket.on('skin_changed', (data) => {
@@ -434,6 +480,13 @@
             const player = upsertRemotePlayerState(data);
             if (!onlinePlayersVisible || !player) return;
             const uid = player.user_id;
+            if (!isRemotePlayerOnCurrentMap(player)) {
+                removePlayer(String(uid));
+                return;
+            }
+            if (!otherPlayers[uid]) {
+                spawnPlayer(player);
+            }
             const entry = otherPlayers[uid];
             if (!entry) return;
             entry.skin_id = player.skin_id;
@@ -740,6 +793,8 @@
 
     function leaveSpace() {
         safeEmit('leave', { guild_id: currentGuildId });
+        clearOtherPlayers();
+        remotePlayerStates = {};
 
         currentGuildId = 'world';
         isWorldMap = true;
@@ -1042,6 +1097,7 @@
             id: String(uid),
             name: (user && user.name) ?? fallback.name ?? null,
             skin_id: user && user.skin_id != null ? String(user.skin_id) : (fallback.skin_id ?? null),
+            map_id: normalizeRemoteMapId((user && user.map_id) ?? fallback.map_id, getCurrentMapId()),
             x: Number((user && user.x) ?? fallback.x ?? 11),
             y: Number((user && user.y) ?? fallback.y ?? 11),
             direction: user && user.direction != null ? Number(user.direction) : (fallback.direction ?? null),
@@ -1075,6 +1131,21 @@
         delete remotePlayerStates[String(userId)];
     }
 
+    function getRemotePlayerEventUniqueId(userId) {
+        return `explore_remote_player:${String(userId)}`;
+    }
+
+    function isRemotePlayerOnCurrentMap(user) {
+        const currentMapId = getCurrentMapId();
+        if (currentMapId == null) return true;
+        return normalizeRemoteMapId(user && user.map_id, currentMapId) === currentMapId;
+    }
+
+    function getRemotePlayerDisplayName(user) {
+        const rawName = String(user && (user.name ?? user.username ?? user.global_name) || "").trim();
+        return rawName || String(user && (user.user_id ?? user.id) || "Unknown");
+    }
+
     function syncVisiblePlayersFromState() {
         clearOtherPlayers();
         if (!onlinePlayersVisible) return;
@@ -1087,7 +1158,7 @@
         onlinePlayersVisible = true;
         syncVisiblePlayersFromState();
         if (!isIgnoredMap() && currentGuildId && Object.keys(remotePlayerStates).length === 0) {
-            safeEmit('join', { guild_id: currentGuildId });
+            emitJoinCurrentGuild();
         }
         HintBar.show("已顯示線上玩家");
     }
@@ -1100,16 +1171,105 @@
 
     function attachSpriteForUserId(userId) {
         const entry = otherPlayers[userId];
-        if (!entry || entry.sprite) return;
+        if (!entry) return;
 
         const scene = SceneManager._scene;
         const spriteset = scene && scene._spriteset;
         if (!spriteset || !spriteset._tilemap) return;
 
-        const sprite = new Sprite_Character(entry.character);
-        if (Array.isArray(spriteset._characterSprites)) spriteset._characterSprites.push(sprite);
-        spriteset._tilemap.addChild(sprite);
+        const sprite = Array.isArray(spriteset._characterSprites)
+            ? spriteset._characterSprites.find(candidate => candidate && candidate._character === entry.character)
+            : null;
+        if (!sprite) return;
+        attachNameLabelToSprite(sprite, entry.name || userId);
         entry.sprite = sprite;
+    }
+
+    function attachNameLabelToSprite(sprite, name) {
+        if (!sprite) return;
+        const labelText = String(name || "").trim();
+        if (!labelText) return;
+
+        let labelSprite = sprite._exploreNameLabel;
+        if (!labelSprite) {
+            const bitmap = new Bitmap(220, 36);
+            bitmap.fontSize = 18;
+            bitmap.outlineWidth = 4;
+            bitmap.outlineColor = "rgba(0, 0, 0, 0.85)";
+            bitmap.textColor = "#ffffff";
+
+            labelSprite = new Sprite(bitmap);
+            labelSprite.anchor.x = 0.5;
+            labelSprite.anchor.y = 1;
+            labelSprite.x = 0;
+            labelSprite.y = -40;
+            sprite.addChild(labelSprite);
+            sprite._exploreNameLabel = labelSprite;
+        }
+
+        const bitmap = labelSprite.bitmap;
+        bitmap.clear();
+        bitmap.drawText(labelText, 0, 0, bitmap.width, bitmap.height, "center");
+    }
+
+    function removeNameLabelFromSprite(sprite) {
+        if (!sprite || !sprite._exploreNameLabel) return;
+        const labelSprite = sprite._exploreNameLabel;
+        if (labelSprite.parent) {
+            labelSprite.parent.removeChild(labelSprite);
+        }
+        sprite._exploreNameLabel = null;
+    }
+
+    function removeCharacterSprites(character) {
+        if (!character) return;
+        const scene = SceneManager._scene;
+        const spriteset = scene && scene._spriteset;
+        const spriteList = spriteset && Array.isArray(spriteset._characterSprites)
+            ? spriteset._characterSprites
+            : null;
+        if (!spriteList) return;
+
+        for (let index = spriteList.length - 1; index >= 0; index--) {
+            const sprite = spriteList[index];
+            if (!sprite || sprite._character !== character) continue;
+            removeNameLabelFromSprite(sprite);
+            if (sprite.parent) {
+                sprite.parent.removeChild(sprite);
+            }
+            spriteList.splice(index, 1);
+        }
+    }
+
+    function removeRemotePlayerEventsByUniqueId(uniqueId) {
+        if (!$gameMap || !Array.isArray($gameMap._events) || !uniqueId) return;
+        for (let eventId = $gameMap._events.length - 1; eventId >= 0; eventId--) {
+            const event = $gameMap._events[eventId];
+            if (!event || !event._eventData || event._eventData.uniqueId !== uniqueId) continue;
+            removeCharacterSprites(event);
+            if (typeof event.erase === "function") {
+                event.erase();
+            }
+            if ($gameMap._events[eventId] === event) {
+                $gameMap._events[eventId] = null;
+            }
+        }
+    }
+
+    function clearOrphanedRemotePlayerEvents() {
+        if (!$gameMap || !Array.isArray($gameMap._events)) return;
+        for (let eventId = $gameMap._events.length - 1; eventId >= 0; eventId--) {
+            const event = $gameMap._events[eventId];
+            const uniqueId = event && event._eventData ? event._eventData.uniqueId : null;
+            if (typeof uniqueId !== "string" || !uniqueId.startsWith("explore_remote_player:")) continue;
+            removeCharacterSprites(event);
+            if (typeof event.erase === "function") {
+                event.erase();
+            }
+            if ($gameMap._events[eventId] === event) {
+                $gameMap._events[eventId] = null;
+            }
+        }
     }
 
     function refreshRemotePlayerSprites() {
@@ -1129,12 +1289,11 @@
                 delete otherPlayers[uid];
                 continue;
             }
-            if ($gameMap && entry.character && $gameMap._events[entry.character['_eventId']] !== undefined) {
-                $gameMap.eraseEvent(entry.character['_eventId']);
-            }
-            // detachSpriteForUserId(uid);
+            removeCharacterSprites(entry.character);
+            removeRemotePlayerEventsByUniqueId(entry.uniqueId || getRemotePlayerEventUniqueId(uid));
             delete otherPlayers[uid];
         }
+        clearOrphanedRemotePlayerEvents();
     }
 
     // --- Player Movement Sync ---
@@ -1193,6 +1352,7 @@
                 if (!isIgnoredMap()) {
                     safeEmit('move', {
                         guild_id: currentGuildId,
+                        map_id: getCurrentMapId(),
                         direction: direction,
                         x: this.x,
                         y: this.y,
@@ -1211,29 +1371,58 @@
         const userId = String(uid);
         if (myUserId && userId === String(myUserId)) return; // Don't spawn self
         if (!onlinePlayersVisible) return;
+        if (!isRemotePlayerOnCurrentMap(user)) {
+            removePlayer(userId);
+            return;
+        }
 
         const x = Number(user.x ?? 11);
         const y = Number(user.y ?? 11);
         const direction = user.direction != null ? Number(user.direction) : null;
         const skinId = user.skin_id != null ? String(user.skin_id) : null;
+        const displayName = getRemotePlayerDisplayName(user);
+        const uniqueId = getRemotePlayerEventUniqueId(userId);
 
         let entry = otherPlayers[userId];
         if (!entry) {
             let { characterName, characterIndex } = getCharacter(skinId);
-            const character = $gameMap.createNormalEventAt(characterName, characterIndex, x, y, 8, 0, true);
-            character.headDisplay = character.list().push({ code: 108, indent: 0, parameters: [`<Name: ${userId}>`] }); // Show Name
+            const character = $gameMap.createNormalEventAt(characterName, characterIndex, x, y, 8, 0, true, null, uniqueId);
+            if (character && character.event && character.event()) {
+                character.event().note = `<Name: ${displayName}>`;
+                if (typeof character.initMetaMembers === "function") {
+                    character.initMetaMembers();
+                }
+                if (typeof character.extractEliMetaData === "function") {
+                    character.extractEliMetaData();
+                }
+            }
             character._priorityType = 0;
             character._stepAnime = false;
             character._moveSpeed = 4;
             character._isBusy = false;
-            entry = otherPlayers[userId] = { character, sprite: null, skin_id: skinId };
+            entry = otherPlayers[userId] = { character, sprite: null, skin_id: skinId, name: displayName, uniqueId };
             attachSpriteForUserId(userId);
         } else {
             entry.skin_id = skinId;
+            entry.name = displayName;
             let { characterName, characterIndex } = getCharacter(skinId);
             entry.character.setImage(characterName, characterIndex);
             if (Number.isFinite(x) && Number.isFinite(y)) entry.character.locate(x, y);
             if (direction != null && Number.isFinite(direction)) entry.character.setDirection(direction);
+            if (entry.character && entry.character.event && entry.character.event()) {
+                entry.character.event().note = `<Name: ${displayName}>`;
+                if (typeof entry.character.initMetaMembers === "function") {
+                    entry.character.initMetaMembers();
+                }
+                if (typeof entry.character.extractEliMetaData === "function") {
+                    entry.character.extractEliMetaData();
+                }
+            }
+            if (entry.sprite && entry.sprite._exploreNameLabel && entry.sprite._exploreNameLabel.bitmap) {
+                const bitmap = entry.sprite._exploreNameLabel.bitmap;
+                bitmap.clear();
+                bitmap.drawText(displayName, 0, 0, bitmap.width, bitmap.height, "center");
+            }
             attachSpriteForUserId(userId);
         }
     }
@@ -1245,6 +1434,10 @@
         const userId = String(uid);
         if (myUserId && userId === String(myUserId)) return;
         if (!onlinePlayersVisible) return;
+        if (!isRemotePlayerOnCurrentMap(data)) {
+            removePlayer(userId);
+            return;
+        }
 
         // 確保玩家存在
         if (!otherPlayers[userId]) {
@@ -1253,10 +1446,10 @@
         const entry = otherPlayers[userId];
         if (!entry) return;
 
-        entry.character.setMoveSpeed(data.moveSpeed);
-        entry.character.setMoveFrequency(data.moveFrequency);
-        entry.character.moveStraight(data.direction);
-        if (data.x !== entry.character.x || data.y !== entry.character.y) {
+        if (data.moveSpeed != null) entry.character.setMoveSpeed(Number(data.moveSpeed));
+        if (data.moveFrequency != null) entry.character.setMoveFrequency(Number(data.moveFrequency));
+        if (data.direction != null) entry.character.moveStraight(Number(data.direction));
+        if (Number.isFinite(Number(data.x)) && Number.isFinite(Number(data.y)) && (data.x !== entry.character.x || data.y !== entry.character.y)) {
             console.log("Correcting position for", userId, "to", data.x, data.y);
             entry.character.setPosition(data.x, data.y);
         }
@@ -1268,11 +1461,12 @@
     function removePlayer(userId) {
         if (!userId) return;
         const entry = otherPlayers[userId];
-        if (!entry) return;
-        if ($gameMap && entry.character && $gameMap._events[entry.character['_eventId']] !== undefined) {
-            $gameMap.eraseEvent(entry.character['_eventId']);
+        if (!entry) {
+            removeRemotePlayerEventsByUniqueId(getRemotePlayerEventUniqueId(userId));
+            return;
         }
-        // detachSpriteForUserId(userId);
+        removeCharacterSprites(entry.character);
+        removeRemotePlayerEventsByUniqueId(entry.uniqueId || getRemotePlayerEventUniqueId(userId));
         delete otherPlayers[userId];
     }
 
@@ -1607,7 +1801,9 @@
                 if (!res.ok) {
                     console.error('Failed to set skin', data);
                 } else {
-                    safeEmit('skin_change', { guild_id: currentGuildId, skin_id: skin.id });
+                    if (!isIgnoredMap()) {
+                        safeEmit('skin_change', { guild_id: currentGuildId, map_id: getCurrentMapId(), skin_id: skin.id });
+                    }
                 }
             } catch (e) {
                 console.error('Failed to set skin', e);
@@ -1619,6 +1815,8 @@
     function connectToSpace(guildId) {
         if (!guildId) return;
         safeEmit('leave', { guild_id: currentGuildId });
+        clearOtherPlayers();
+        remotePlayerStates = {};
 
         currentGuildId = String(guildId);
         isWorldMap = false;
@@ -1654,12 +1852,15 @@
         applySpaceTiles();
 
         // 清除舊地圖殘留的遠端玩家資料
+        clearOtherPlayers();
         otherPlayers = {};
         remotePlayerStates = {};
 
         // 非忽略地圖自動加入房間（伺服器會回傳 room_state 重新生成玩家）
-        if (!isIgnoredMap() && currentGuildId) {
-            safeEmit('join', { guild_id: currentGuildId });
+        if (isIgnoredMap()) {
+            safeEmit('leave', { guild_id: currentGuildId });
+        } else {
+            emitJoinCurrentGuild();
         }
     };
 

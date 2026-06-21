@@ -359,6 +359,7 @@
     function createNormalEventAt(characterName, characterIndex, x, y, d, scriptOrCommonEventId, temporary, _pages, uniqueId, selectedPage) {
       var eventData = new CustomEventData();
       eventData.note = "";
+      eventData.meta = eventData.meta || {};
       eventData.page.image.direction = d;
       eventData.page.image.characterName = characterName;
       eventData.page.image.characterIndex = characterIndex;
