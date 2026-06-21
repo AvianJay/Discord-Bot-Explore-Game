@@ -88,7 +88,7 @@
     const MAP_WAIT  = 3; // 等待室 / 起始地圖
 
     // 不加入任何房間的地圖 ID（等待室、過場動畫等）
-    const IGNORED_MAPS = [3, 4, 5, 6, 7, 8, 9, 1];
+    const IGNORED_MAPS = [3, 4, 5, 6, 7, 8, 9];
     const SAVE_DATA_API_PATH = "/api/explore/me/save-data";
     const DEFAULT_LOAD_MAP_ID = 5;
     const DEFAULT_LOAD_X = 8;
