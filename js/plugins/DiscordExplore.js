@@ -74,6 +74,19 @@
  * @text 隱藏音樂播放器
  * @desc 隱藏音樂播放器覆蓋 UI。
  *
+ * @command CompleteQuest
+ * @text 完成任務
+ * @desc 向伺服器回報完成一次性任務（伺服端驗證），成功後設定任務開關與獎勵變數（V11=幣、V12=XP）。
+ *
+ * @arg questId
+ * @type string
+ * @text 任務 ID
+ * @desc 例如 vill_rat / vill_delivery / vill_cabbage / vill_boss
+ *
+ * @command SyncQuestSwitches
+ * @text 同步任務開關
+ * @desc 從伺服器抓取任務完成狀態並套用到開關 11-15。
+ *
  * @help DiscordExplore.js
  *
  * This plugin integrates with the Discord Explore backend.
@@ -124,6 +137,7 @@
 
     let myUserId = null;
     let myName = null;
+    let myLevel = null;
     let pendingSpaceTiles = null; // [{x,y,z,tile_id}]
     let pendingLoadedSaveContext = null;
 
@@ -131,6 +145,7 @@
     let isEditMode = false;
     let currentTileId = 0;
     let currentZ = 0; // 0=Layer 1, 1=Layer 2, etc.
+    let canEditCurrentSpace = false;
 
     // --- Dev / Test Mode ---
     let isDevMode = false;
@@ -202,9 +217,23 @@
         safeEmit('join', buildJoinPayload());
     }
 
-    function showHint(message) {
+    let _hintHideTimer = null;
+    function showHint(message, duration = 4000) {
         if (typeof HintBar !== "undefined" && HintBar && typeof HintBar.show === "function") {
             HintBar.show(String(message));
+            if (_hintHideTimer) {
+                clearTimeout(_hintHideTimer);
+                _hintHideTimer = null;
+            }
+            // 自動隱藏,避免提示永遠卡在畫面上;duration<=0 表示常駐
+            if (duration > 0) {
+                _hintHideTimer = setTimeout(() => {
+                    _hintHideTimer = null;
+                    if (typeof HintBar !== "undefined" && HintBar && typeof HintBar.hide === "function") {
+                        HintBar.hide();
+                    }
+                }, duration);
+            }
         } else {
             console.log(`[Explore] ${message}`);
         }
@@ -431,6 +460,8 @@
 
         socket.on('joined', (data) => {
             myUserId = data.user_id;
+            if (data.level != null) myLevel = Number(data.level);
+            if (data.skin_id != null) applySkinToSelf(data.skin_id);
         });
 
         socket.on('room_state', (data) => {
@@ -503,10 +534,71 @@
             }
         });
 
+        socket.on('level_up', (data) => {
+            if (!data || String(data.guild_id) !== String(currentGuildId)) return;
+            const uid = String(data.user_id);
+            const level = Number(data.level);
+            if (myUserId && uid === String(myUserId)) {
+                myLevel = level;
+                showHint(`🎉 升級了!現在是 Lv.${level}`);
+                return;
+            }
+            const player = remotePlayerStates[uid];
+            if (player) {
+                player.level = level;
+                const entry = otherPlayers[uid];
+                if (entry) {
+                    entry.name = getRemotePlayerDisplayName(player);
+                    if (entry.sprite && entry.sprite._exploreNameLabel && entry.sprite._exploreNameLabel.bitmap) {
+                        const bitmap = entry.sprite._exploreNameLabel.bitmap;
+                        bitmap.clear();
+                        bitmap.drawText(entry.name, 0, 0, bitmap.width, bitmap.height, "center");
+                    }
+                }
+            }
+        });
+
         socket.on('map_edited', (data) => {
             // data: { guild_id, x, y, z, tile_id }
             if ($gameMap && typeof $gameMap.setNormalTile === 'function') {
                 $gameMap.setNormalTile(data.x, data.y, data.z, Number(data.tile_id));
+            }
+        });
+
+        // Chat events
+        socket.on('chat_message', (data) => {
+            if (!data || String(data.guild_id) !== String(currentGuildId)) return;
+            _appendChatMessageDOM(data);
+            // 頭頂氣泡(訊息來源是遊戲內玩家且在同地圖才顯示)
+            if (data.source !== 'discord') {
+                showChatBubble(String(data.user_id), data.text);
+            }
+        });
+
+        socket.on('chat_history', (data) => {
+            if (!data || String(data.guild_id) !== String(currentGuildId)) return;
+            _clearChatMessagesDOM();
+            const messages = Array.isArray(data.messages) ? data.messages : [];
+            for (const message of messages) {
+                _appendChatMessageDOM(message, { silent: true });
+            }
+            chatUnreadCount = 0;
+            _updateChatOverlay();
+        });
+
+        socket.on('chat_error', (data) => {
+            showHint((data && data.message) || '訊息發送失敗');
+        });
+
+        socket.on('user_emote', (data) => {
+            if (!data || String(data.guild_id) !== String(currentGuildId)) return;
+            const uid = String(data.user_id);
+            if (myUserId && uid === String(myUserId)) return; // 自己已本地播放
+            const balloonId = Number(data.balloon_id);
+            if (!balloonId) return;
+            const entry = otherPlayers[uid];
+            if (entry && entry.character && $gameTemp && isRemotePlayerOnCurrentMap(data)) {
+                $gameTemp.requestBalloon(entry.character, balloonId);
             }
         });
 
@@ -609,6 +701,24 @@
         return !!(musicState && musicState.available);
     }
 
+    /** 防止面板上的按鈕搶走鍵盤焦點(避免 Enter/空白鍵重複觸發按鈕、遊戲按鍵失效);INPUT 除外 */
+    function _preventFocusSteal(shell) {
+        shell.addEventListener('mousedown', (ev) => {
+            const target = ev.target;
+            if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+            ev.preventDefault();
+        });
+        // 觸控等其他途徑萬一還是聚焦了,點完立刻放掉焦點
+        shell.addEventListener('click', (ev) => {
+            const target = ev.target;
+            if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+            const active = document.activeElement;
+            if (active && active !== document.body && shell.contains(active)) {
+                active.blur();
+            }
+        });
+    }
+
     /** Create the music overlay DOM element if it doesn't exist yet. */
     function _ensureMusicOverlayDOM() {
         if (document.getElementById('explore-music-shell')) return;
@@ -642,6 +752,7 @@
   <span id="emp-toggle-icon" style="position:relative;font-size:22px;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.35)">🎵</span>
 </button>`;
         document.body.appendChild(shell);
+        _preventFocusSteal(shell);
 
         document.getElementById('emp-btn-play').onclick = () => {
             musicState && musicState.is_paused ? musicAction('play') : musicAction('pause');
@@ -735,6 +846,242 @@
         _updateMusicOverlay();
     }
 
+    // --- Chat UI (DOM overlay, bottom-right) ---
+
+    let chatUiVisible = false;
+    let chatUnreadCount = 0;
+    const CHAT_EMOTES = [
+        { balloon: 1, icon: "❗" },
+        { balloon: 2, icon: "❓" },
+        { balloon: 4, icon: "❤️" },
+        { balloon: 3, icon: "🎵" },
+        { balloon: 6, icon: "💦" },
+        { balloon: 7, icon: "😵" },
+        { balloon: 11, icon: "💤" },
+    ];
+
+    function _escapeChatHtml(text) {
+        return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function _ensureChatOverlayDOM() {
+        if (document.getElementById('explore-chat-shell')) return;
+        const shell = document.createElement('div');
+        shell.id = 'explore-chat-shell';
+        shell.style.cssText = [
+            'position:fixed', 'right:14px', 'bottom:14px',
+            'z-index:9998', 'display:none',
+            'pointer-events:none', 'font-family:sans-serif',
+        ].join(';');
+        shell.innerHTML = `
+<div id="explore-chat-panel" style="position:relative;width:340px;max-width:calc(100vw - 28px);margin-bottom:64px;background:linear-gradient(135deg, rgba(12,18,30,0.96), rgba(27,38,60,0.92));color:#fff;border-radius:18px;padding:12px;box-shadow:0 18px 38px rgba(0,0,0,0.42);backdrop-filter:blur(10px);transform:translateX(calc(100% + 12px));opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:auto;border:1px solid rgba(255,255,255,0.09)">
+  <div style="font-weight:700;font-size:13px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
+    <span>💬 聊天室</span>
+    <span id="ec-room" style="opacity:0.6;font-size:11px;font-weight:400"></span>
+  </div>
+  <div id="ec-messages" style="height:200px;overflow-y:auto;font-size:13px;line-height:1.5;display:flex;flex-direction:column;gap:4px;margin-bottom:8px;scrollbar-width:thin"></div>
+  <div id="ec-emotes" style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap"></div>
+  <div style="display:flex;gap:6px">
+    <input id="ec-input" type="text" maxlength="200" placeholder="說點什麼..." style="flex:1;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.14);color:#fff;border-radius:8px;padding:7px 10px;font-size:13px;outline:none"/>
+    <button id="ec-send" style="background:rgba(92,169,255,0.35);border:none;color:#fff;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px">送出</button>
+  </div>
+</div>
+<button id="explore-chat-toggle" title="聊天室" style="position:absolute;right:0;bottom:0;width:52px;height:52px;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:linear-gradient(135deg, rgba(255,255,255,0.2), rgba(92,255,169,0.26));box-shadow:0 14px 28px rgba(0,0,0,0.3);cursor:pointer;pointer-events:auto;display:flex;align-items:center;justify-content:center;padding:0;transition:transform 220ms ease">
+  <span style="position:relative;font-size:22px;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.35)">💬</span>
+  <span id="ec-badge" style="position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;border-radius:9px;background:#ff4d5e;color:#fff;font-size:11px;font-weight:700;display:none;align-items:center;justify-content:center;padding:0 4px">0</span>
+</button>`;
+        document.body.appendChild(shell);
+        _preventFocusSteal(shell);
+
+        // 防止點擊面板穿透到遊戲(TouchInput 在 document 上監聽)
+        for (const evName of ['mousedown', 'mouseup', 'touchstart', 'touchend', 'wheel']) {
+            shell.addEventListener(evName, (ev) => ev.stopPropagation());
+        }
+
+        const input = document.getElementById('ec-input');
+        // 阻止 RMMZ 攔截打字(WASD 移動、Enter 確認等)
+        for (const evName of ['keydown', 'keyup', 'keypress']) {
+            input.addEventListener(evName, (ev) => {
+                ev.stopPropagation();
+                if (evName === 'keydown' && ev.key === 'Enter') {
+                    _sendChatFromInput();
+                }
+                if (evName === 'keydown' && ev.key === 'Escape') {
+                    input.blur();
+                }
+            });
+        }
+        document.getElementById('ec-send').onclick = () => _sendChatFromInput();
+        document.getElementById('explore-chat-toggle').onclick = () => {
+            chatUiVisible = !chatUiVisible;
+            if (chatUiVisible) {
+                chatUnreadCount = 0;
+            } else {
+                input.blur();
+            }
+            _updateChatOverlay();
+        };
+
+        const emoteRow = document.getElementById('ec-emotes');
+        for (const emote of CHAT_EMOTES) {
+            const btn = document.createElement('button');
+            btn.textContent = emote.icon;
+            btn.style.cssText = 'background:rgba(255,255,255,0.1);border:none;border-radius:8px;padding:4px 8px;cursor:pointer;font-size:15px';
+            btn.onclick = () => sendEmote(emote.balloon);
+            emoteRow.appendChild(btn);
+        }
+    }
+
+    function _shouldShowChatLauncher() {
+        return !!(socket && socket.connected && currentGuildId && !isIgnoredMap()) || isDevMode;
+    }
+
+    function _updateChatOverlay() {
+        _ensureChatOverlayDOM();
+        const shell = document.getElementById('explore-chat-shell');
+        const panel = document.getElementById('explore-chat-panel');
+        const launcher = document.getElementById('explore-chat-toggle');
+        const badge = document.getElementById('ec-badge');
+        const room = document.getElementById('ec-room');
+        if (!shell || !panel || !launcher) return;
+
+        if (!_shouldShowChatLauncher()) {
+            shell.style.display = 'none';
+            chatUiVisible = false;
+            return;
+        }
+
+        shell.style.display = 'block';
+        panel.style.transform = chatUiVisible ? 'translateX(0)' : 'translateX(calc(100% + 12px))';
+        panel.style.opacity = chatUiVisible ? '1' : '0';
+        panel.style.pointerEvents = chatUiVisible ? 'auto' : 'none';
+        launcher.style.transform = chatUiVisible ? 'scale(0.98)' : 'scale(1)';
+        if (room) room.textContent = String(currentGuildId) === 'world' ? '大廳' : '';
+        if (badge) {
+            badge.style.display = (!chatUiVisible && chatUnreadCount > 0) ? 'flex' : 'none';
+            badge.textContent = String(Math.min(chatUnreadCount, 99));
+        }
+    }
+
+    function _appendChatMessageDOM(message, options = {}) {
+        _ensureChatOverlayDOM();
+        const list = document.getElementById('ec-messages');
+        if (!list) return;
+
+        const isMe = myUserId && String(message.user_id) === String(myUserId);
+        const fromDiscord = message.source === 'discord';
+        const row = document.createElement('div');
+        const levelTag = message.level != null ? `Lv.${Number(message.level)} ` : '';
+        const sourceTag = fromDiscord ? '<span style="opacity:0.75">[DC]</span> ' : '';
+        const nameColor = isMe ? '#8fd0ff' : (fromDiscord ? '#a0e8af' : '#ffd27d');
+        row.innerHTML = `${sourceTag}<span style="color:${nameColor};font-weight:700">${_escapeChatHtml(levelTag + (message.name || message.user_id))}</span>: ${_escapeChatHtml(message.text || '')}`;
+        list.appendChild(row);
+        while (list.children.length > 80) list.removeChild(list.firstChild);
+        list.scrollTop = list.scrollHeight;
+
+        if (!chatUiVisible && !options.silent) {
+            chatUnreadCount++;
+        }
+        _updateChatOverlay();
+    }
+
+    function _clearChatMessagesDOM() {
+        const list = document.getElementById('ec-messages');
+        if (list) list.innerHTML = '';
+    }
+
+    function _sendChatFromInput() {
+        const input = document.getElementById('ec-input');
+        if (!input) return;
+        const text = String(input.value || '').trim();
+        if (!text) return;
+        input.value = '';
+        if (isDevMode) {
+            _appendChatMessageDOM({ user_id: myUserId, name: myName || 'Dev', text, level: myLevel }, { silent: true });
+            return;
+        }
+        safeEmit('chat_send', { guild_id: currentGuildId, text });
+    }
+
+    function sendEmote(balloonId) {
+        if ($gamePlayer && $gameTemp) {
+            $gameTemp.requestBalloon($gamePlayer, Number(balloonId));
+        }
+        safeEmit('emote', { guild_id: currentGuildId, map_id: getCurrentMapId(), balloon_id: Number(balloonId) });
+    }
+
+    // --- Overhead chat bubbles ---
+
+    function _findSpriteForUserId(userId) {
+        const entry = otherPlayers[String(userId)];
+        if (entry && entry.sprite) return entry.sprite;
+        if (entry && entry.character) {
+            const scene = SceneManager._scene;
+            const spriteset = scene && scene._spriteset;
+            if (spriteset && Array.isArray(spriteset._characterSprites)) {
+                return spriteset._characterSprites.find(s => s && s._character === entry.character) || null;
+            }
+        }
+        return null;
+    }
+
+    function _findMySprite() {
+        const scene = SceneManager._scene;
+        const spriteset = scene && scene._spriteset;
+        if (spriteset && Array.isArray(spriteset._characterSprites)) {
+            return spriteset._characterSprites.find(s => s && s._character === $gamePlayer) || null;
+        }
+        return null;
+    }
+
+    function showChatBubble(userId, text) {
+        const sprite = (myUserId && String(userId) === String(myUserId)) ? _findMySprite() : _findSpriteForUserId(userId);
+        if (!sprite) return;
+
+        // 移除舊氣泡
+        if (sprite._exploreChatBubble) {
+            if (sprite._exploreChatBubble.parent) {
+                sprite._exploreChatBubble.parent.removeChild(sprite._exploreChatBubble);
+            }
+            sprite._exploreChatBubble = null;
+        }
+
+        let display = String(text || '');
+        if (display.length > 30) display = display.slice(0, 30) + '…';
+
+        const bitmap = new Bitmap(260, 34);
+        bitmap.fontSize = 15;
+        const textWidth = Math.min(bitmap.measureTextWidth(display) + 16, 256);
+        bitmap.fillRoundRect
+            ? bitmap.fillRoundRect((260 - textWidth) / 2, 2, textWidth, 26, 8, "rgba(0,0,0,0.66)")
+            : bitmap.fillRect((260 - textWidth) / 2, 2, textWidth, 26, "rgba(0,0,0,0.66)");
+        bitmap.textColor = "#ffffff";
+        bitmap.outlineWidth = 0;
+        bitmap.drawText(display, 0, 0, 260, 30, "center");
+
+        const bubble = new Sprite(bitmap);
+        bubble.anchor.x = 0.5;
+        bubble.anchor.y = 1;
+        bubble.y = -62; // 名字標籤上方
+        sprite.addChild(bubble);
+        sprite._exploreChatBubble = bubble;
+        bubble._exploreExpireFrame = Graphics.frameCount + 240; // 約 4 秒
+    }
+
+    const _Sprite_Character_update = Sprite_Character.prototype.update;
+    Sprite_Character.prototype.update = function () {
+        _Sprite_Character_update.call(this);
+        const bubble = this._exploreChatBubble;
+        if (bubble && bubble._exploreExpireFrame != null && Graphics.frameCount >= bubble._exploreExpireFrame) {
+            if (bubble.parent) bubble.parent.removeChild(bubble);
+            this._exploreChatBubble = null;
+        }
+    };
+
     // --- Plugin Commands (RPG Maker MZ) ---
     // These are the commands you can call from event commands.
     // Menu entries below also call these to stay in sync.
@@ -790,6 +1137,137 @@
         musicUiVisible = false;
         _hideMusicOverlay();
     });
+
+    // --- Quests (server-verified, one-time) ---
+    // 開關對應:11=鼠患 12=快遞 13=高麗菜 14=Boss出現(前置全完成) 15=Boss討伐
+    // 變數對應:11=本次獎勵全域幣 12=本次獎勵XP
+
+    const QUEST_SWITCH_MAP = {
+        vill_rat: 11,
+        vill_delivery: 12,
+        vill_cabbage: 13,
+        vill_boss: 15,
+    };
+    const QUEST_BOSS_READY_SWITCH = 14;
+    const QUEST_REWARD_COIN_VAR = 11;
+    const QUEST_REWARD_XP_VAR = 12;
+    const VILL_BOSS_PREREQS = ["vill_rat", "vill_delivery", "vill_cabbage"];
+
+    function applyQuestStateToSwitches(state) {
+        if (!$gameSwitches || !state) return;
+        const completed = new Set(state.completed || []);
+        for (const questId of Object.keys(QUEST_SWITCH_MAP)) {
+            $gameSwitches.setValue(QUEST_SWITCH_MAP[questId], completed.has(questId));
+        }
+        const bossReady = state.vill_boss_ready != null
+            ? !!state.vill_boss_ready
+            : VILL_BOSS_PREREQS.every(q => completed.has(q));
+        $gameSwitches.setValue(QUEST_BOSS_READY_SWITCH, bossReady);
+    }
+
+    async function syncQuestSwitches() {
+        if (isDevMode) {
+            // 開發模式:由目前開關推算 Boss ready
+            if ($gameSwitches) {
+                const ready = [11, 12, 13].every(id => $gameSwitches.value(id));
+                $gameSwitches.setValue(QUEST_BOSS_READY_SWITCH, ready);
+            }
+            return;
+        }
+        if (!exploreAuthToken) return;
+        try {
+            const res = await fetch('/api/explore/quests', {
+                headers: { 'Authorization': `Bearer ${exploreAuthToken}` }
+            });
+            const data = await res.json();
+            if (res.ok) {
+                applyQuestStateToSwitches(data);
+                if (data.level != null) myLevel = Number(data.level);
+            }
+        } catch (e) {
+            console.error('Failed to sync quest switches', e);
+        }
+    }
+
+    async function completeQuestRequest(questId) {
+        if ($gameVariables) {
+            $gameVariables.setValue(QUEST_REWARD_COIN_VAR, 0);
+            $gameVariables.setValue(QUEST_REWARD_XP_VAR, 0);
+        }
+
+        if (isDevMode) {
+            const switchId = QUEST_SWITCH_MAP[questId];
+            if (switchId && $gameSwitches) $gameSwitches.setValue(switchId, true);
+            if ($gameVariables) {
+                $gameVariables.setValue(QUEST_REWARD_COIN_VAR, 30);
+                $gameVariables.setValue(QUEST_REWARD_XP_VAR, 50);
+            }
+            await syncQuestSwitches();
+            showHint(`[Dev] 任務 ${questId} 完成`);
+            return true;
+        }
+
+        if (!exploreAuthToken) {
+            showHint('尚未連線,無法完成任務');
+            return false;
+        }
+        try {
+            const res = await fetch('/api/explore/quests/complete', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${exploreAuthToken}`
+                },
+                body: JSON.stringify({ quest_id: questId })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                showHint(data.error || '任務完成失敗');
+                return false;
+            }
+            if ($gameVariables) {
+                $gameVariables.setValue(QUEST_REWARD_COIN_VAR, Number(data.coins || 0));
+                $gameVariables.setValue(QUEST_REWARD_XP_VAR, Number(data.xp_gained || 0));
+            }
+            if (data.level != null) myLevel = Number(data.level);
+            applyQuestStateToSwitches({ completed: data.completed_quests || [] });
+            showHint(`✅ ${data.name || questId} 完成!獲得 ${data.coins || 0} 全域幣、${data.xp_gained || 0} XP`);
+            return true;
+        } catch (e) {
+            console.error('Failed to complete quest', e);
+            showHint('任務完成失敗(連線錯誤)');
+            return false;
+        }
+    }
+
+    PluginManager.registerCommand(PLUGIN_NAME, "CompleteQuest", function (args) {
+        const questId = String(args.questId || '').trim();
+        if (!questId) return;
+        // 阻塞事件直到伺服器回應,讓後續分歧能讀到開關/變數
+        this._exploreQuestWaiting = true;
+        this.setWaitMode('exploreQuest');
+        completeQuestRequest(questId).finally(() => {
+            this._exploreQuestWaiting = false;
+        });
+    });
+
+    PluginManager.registerCommand(PLUGIN_NAME, "SyncQuestSwitches", function () {
+        this._exploreQuestWaiting = true;
+        this.setWaitMode('exploreQuest');
+        syncQuestSwitches().finally(() => {
+            this._exploreQuestWaiting = false;
+        });
+    });
+
+    const _Game_Interpreter_updateWaitMode = Game_Interpreter.prototype.updateWaitMode;
+    Game_Interpreter.prototype.updateWaitMode = function () {
+        if (this._waitMode === 'exploreQuest') {
+            if (this._exploreQuestWaiting) return true;
+            this._waitMode = '';
+            return false;
+        }
+        return _Game_Interpreter_updateWaitMode.call(this);
+    };
 
     function leaveSpace() {
         safeEmit('leave', { guild_id: currentGuildId });
@@ -1007,6 +1485,9 @@
     function fetchMapData() {
         if (isWorldMap) {
             setActivity("在大廳", "大廳", "lobby");
+            canEditCurrentSpace = false;
+            isEditMode = false;
+            _updateEditorToolbar();
             return;
         }
 
@@ -1023,6 +1504,9 @@
                 const guild_name = data.name || "未知伺服器";
                 const guild_icon = data.icon_url || "lobby";
                 setActivity(`在 ${guild_name} 的空間`, guild_name, guild_icon);
+                canEditCurrentSpace = !!data.can_edit;
+                if (!canEditCurrentSpace) isEditMode = false;
+                _updateEditorToolbar();
             })
             .catch(e => console.error("Failed to fetch guild info", e));
 
@@ -1049,7 +1533,6 @@
     function setupGuildMap(data) {
         // Legacy
         console.log("Guild Map Data:", data);
-        isEditMode = true;
     }
 
     function applySpaceTiles() {
@@ -1072,13 +1555,35 @@
         return { characterName: fallbackName, characterIndex: fallbackIndex };
     }
 
-    function getCharacter(skinId) {
+    function parseSkinId(skinId) {
+        // Skin id format: "<CharacterSheet>:<index>", e.g. "Actor1:3".
+        const raw = String(skinId || "").trim();
+        if (!raw) return null;
+        const parts = raw.split(":");
+        if (parts.length !== 2) return null;
+        const sheet = parts[0].trim();
+        const index = Number(parts[1]);
+        if (!sheet || !Number.isInteger(index) || index < 0 || index > 7) return null;
+        return { characterName: sheet, characterIndex: index };
+    }
 
-        // NOTE: Our backend only provides skin_id, not the actual RPG Maker character sheet.
-        // For now, use the player's current character as a fallback.
-        // If you later add a skin_id -> {characterName, characterIndex} mapping, plug it in here.
-        const img = getFallbackCharacterImage();
-        return { characterName: img.characterName, characterIndex: img.characterIndex };
+    function getCharacter(skinId) {
+        const parsed = parseSkinId(skinId);
+        if (parsed) return parsed;
+        return getFallbackCharacterImage();
+    }
+
+    function applySkinToSelf(skinId) {
+        // Apply to actor 1 so menus/save data stay consistent, then refresh the player.
+        const parsed = parseSkinId(skinId);
+        if (!parsed) return;
+        const actor = $gameActors && $gameActors.actor(1);
+        if (actor) {
+            actor.setCharacterImage(parsed.characterName, parsed.characterIndex);
+        }
+        if ($gamePlayer) {
+            $gamePlayer.refresh();
+        }
     }
 
     function applySkinToCharacter(character, skinId) {
@@ -1097,6 +1602,7 @@
             id: String(uid),
             name: (user && user.name) ?? fallback.name ?? null,
             skin_id: user && user.skin_id != null ? String(user.skin_id) : (fallback.skin_id ?? null),
+            level: (user && user.level != null) ? Number(user.level) : (fallback.level ?? null),
             map_id: normalizeRemoteMapId((user && user.map_id) ?? fallback.map_id, getCurrentMapId()),
             x: Number((user && user.x) ?? fallback.x ?? 11),
             y: Number((user && user.y) ?? fallback.y ?? 11),
@@ -1143,7 +1649,9 @@
 
     function getRemotePlayerDisplayName(user) {
         const rawName = String(user && (user.name ?? user.username ?? user.global_name) || "").trim();
-        return rawName || String(user && (user.user_id ?? user.id) || "Unknown");
+        const baseName = rawName || String(user && (user.user_id ?? user.id) || "Unknown");
+        const level = user && user.level != null ? Number(user.level) : null;
+        return (level && level > 0) ? `Lv.${level} ${baseName}` : baseName;
     }
 
     function syncVisiblePlayersFromState() {
@@ -1477,13 +1985,18 @@
     }
 
     Window_MenuCommand.prototype.addSkinCommand = function () {
-        this.addCommand("更換外觀", "changeSkin", true);
+        this.addCommand("皮膚商店", "changeSkin", true);
+    }
+
+    Window_MenuCommand.prototype.addPlayersCommand = function () {
+        this.addCommand("線上玩家", "showPlayers", true);
     }
 
     const _Window_MenuCommand_makeCommandList = Window_MenuCommand.prototype.makeCommandList;
     Window_MenuCommand.prototype.makeCommandList = function () {
         this.addGuildsCommand();
         this.addSkinCommand();
+        this.addPlayersCommand();
         this.addOptionsCommand();
     }
 
@@ -1493,6 +2006,11 @@
         _Scene_Menu_createCommandWindow.call(this);
         this._commandWindow.setHandler("openGuilds", this.commandOpenGuilds.bind(this));
         this._commandWindow.setHandler("changeSkin", this.commandChangeSkin.bind(this));
+        this._commandWindow.setHandler("showPlayers", this.commandShowPlayers.bind(this));
+    };
+
+    Scene_Menu.prototype.commandShowPlayers = function () {
+        SceneManager.push(Scene_ExplorePlayerList);
     };
 
     Scene_Menu.prototype.commandOpenGuilds = function () {
@@ -1724,11 +2242,25 @@
         initialize(rect) {
             super.initialize(rect);
             this._skins = [];
+            this._currentSkinId = null;
+            this._balance = null;
+            this._currencyName = "全域幣";
             this.refresh();
         }
 
-        setSkins(skins) {
-            this._skins = skins || [];
+        maxCols() {
+            return 2;
+        }
+
+        itemHeight() {
+            return 64;
+        }
+
+        setShopData(data) {
+            this._skins = (data && data.skins) || [];
+            this._currentSkinId = data && data.current_skin_id != null ? String(data.current_skin_id) : null;
+            this._balance = data && data.balance != null ? Number(data.balance) : null;
+            this._currencyName = (data && data.currency_name) || "全域幣";
             this.refresh();
             this.select(0);
         }
@@ -1741,11 +2273,83 @@
             return this._skins[index];
         }
 
+        drawAllItems() {
+            this.drawHeader();
+            Window_Selectable.prototype.drawAllItems.call(this);
+        }
+
+        drawHeader() {
+            const width = this.innerWidth - this.itemPadding() * 2;
+            this.contents.fontSize = 24;
+            this.changeTextColor(ColorManager.systemColor());
+            this.drawText("皮膚商店", this.itemPadding(), 4, width, "center");
+            this.resetTextColor();
+            if (this._balance != null) {
+                this.contents.fontSize = 16;
+                this.contents.paintOpacity = 200;
+                this.drawText(`持有 ${this._currencyName}: ${Math.floor(this._balance)}`, this.itemPadding(), 34, width, "center");
+                this.contents.paintOpacity = 255;
+            }
+            this.resetFontSettings();
+        }
+
+        itemRect(index) {
+            const rect = Window_Selectable.prototype.itemRect.call(this, index);
+            rect.y += 60;
+            rect.height = this.itemHeight() - 6;
+            return rect;
+        }
+
         drawItem(index) {
             const skin = this.skinAt(index);
             if (!skin) return;
             const rect = this.itemRectWithPadding(index);
-            this.drawText(`${skin.name} [${skin.id}]`, rect.x, rect.y, rect.width);
+            const isCurrent = this._currentSkinId != null && String(skin.id) === this._currentSkinId;
+            const owned = !!skin.owned || !skin.price;
+
+            // 角色預覽(取站立第一格)
+            const parsed = parseSkinId(skin.id);
+            if (parsed) {
+                try {
+                    const bitmap = ImageManager.loadCharacter(parsed.characterName);
+                    if (bitmap && bitmap.isReady()) {
+                        const big = ImageManager.isBigCharacter(parsed.characterName);
+                        const pw = bitmap.width / (big ? 3 : 12);
+                        const ph = bitmap.height / (big ? 4 : 8);
+                        const n = big ? 0 : parsed.characterIndex;
+                        const sx = ((n % 4) * 3 + 1) * pw;
+                        const sy = Math.floor(n / 4) * 4 * ph;
+                        const scale = Math.min(48 / pw, 48 / ph, 1);
+                        this.contents.blt(bitmap, sx, sy, pw, ph, rect.x + 4, rect.y + (rect.height - ph * scale) / 2, pw * scale, ph * scale);
+                    } else if (bitmap) {
+                        bitmap.addLoadListener(() => this.refresh());
+                    }
+                } catch (e) { /* 預覽失敗不擋列表 */ }
+            }
+
+            const textX = rect.x + 56;
+            const textWidth = rect.width - 60;
+            this.contents.fontSize = 20;
+            this.changePaintOpacity(owned || isCurrent);
+            this.resetTextColor();
+            if (isCurrent) this.changeTextColor(ColorManager.powerUpColor());
+            this.drawText(String(skin.name || skin.id), textX, rect.y + 4, textWidth, "left");
+            this.resetTextColor();
+
+            this.contents.fontSize = 15;
+            this.contents.paintOpacity = 180;
+            let subText;
+            if (isCurrent) {
+                subText = "使用中";
+            } else if (owned) {
+                subText = "已擁有";
+            } else {
+                subText = `${skin.price} ${this._currencyName}`;
+            }
+            this.drawText(subText, textX, rect.y + 30, textWidth, "left");
+            this.contents.paintOpacity = 255;
+            this.changePaintOpacity(true);
+            this.resetFontSettings();
         }
     }
 
@@ -1753,7 +2357,14 @@
         create() {
             super.create();
             this.createWindowLayer();
-            const rect = new Rectangle(0, 0, Graphics.boxWidth, Graphics.boxHeight);
+            const topInset = Math.max(this.buttonAreaBottom() + 8, 60);
+            const sideInset = 28;
+            const rect = new Rectangle(
+                sideInset,
+                topInset,
+                Graphics.boxWidth - sideInset * 2,
+                Graphics.boxHeight - topInset - 24
+            );
             this._listWindow = new Window_ExploreSkinList(rect);
             this._listWindow.setHandler('ok', this.onOk.bind(this));
             this._listWindow.setHandler('cancel', this.popScene.bind(this));
@@ -1775,19 +2386,59 @@
                 const data = await res.json();
                 if (!res.ok) {
                     console.error('Failed to fetch skins', data);
-                    this._listWindow.setSkins([]);
+                    this._listWindow.setShopData({ skins: [] });
                     return;
                 }
-                this._listWindow.setSkins(data);
+                // 相容舊格式(純陣列)與新格式({skins, current_skin_id, balance})
+                if (Array.isArray(data)) {
+                    this._listWindow.setShopData({ skins: data });
+                } else {
+                    this._listWindow.setShopData(data);
+                }
             } catch (e) {
                 console.error('Failed to fetch skins', e);
-                this._listWindow.setSkins([]);
+                this._listWindow.setShopData({ skins: [] });
             }
         }
 
         async onOk() {
             const skin = this._listWindow.skinAt(this._listWindow.index());
             if (!skin) return;
+            const owned = !!skin.owned || !skin.price;
+            if (owned) {
+                await this.equipSkin(skin);
+            } else {
+                await this.buySkin(skin);
+            }
+            this._listWindow.activate();
+        }
+
+        async buySkin(skin) {
+            try {
+                const res = await fetch('/api/explore/skins/buy', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${exploreAuthToken}`
+                    },
+                    body: JSON.stringify({ skin_id: skin.id })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    showHint(data.error || '購買失敗');
+                    SoundManager.playBuzzer();
+                    return;
+                }
+                showHint(`已購買 ${skin.name}!`);
+                SoundManager.playShop();
+                await this.fetchSkins();
+            } catch (e) {
+                console.error('Failed to buy skin', e);
+                showHint('購買失敗');
+            }
+        }
+
+        async equipSkin(skin) {
             try {
                 const res = await fetch('/api/explore/me/skin', {
                     method: 'POST',
@@ -1799,16 +2450,156 @@
                 });
                 const data = await res.json();
                 if (!res.ok) {
-                    console.error('Failed to set skin', data);
-                } else {
-                    if (!isIgnoredMap()) {
-                        safeEmit('skin_change', { guild_id: currentGuildId, map_id: getCurrentMapId(), skin_id: skin.id });
-                    }
+                    showHint(data.error || '更換失敗');
+                    SoundManager.playBuzzer();
+                    return;
                 }
+                applySkinToSelf(skin.id);
+                showHint(`已換上 ${skin.name}`);
+                SoundManager.playEquip();
+                if (!isIgnoredMap()) {
+                    safeEmit('skin_change', { guild_id: currentGuildId, map_id: getCurrentMapId(), skin_id: skin.id });
+                }
+                await this.fetchSkins();
             } catch (e) {
                 console.error('Failed to set skin', e);
+                showHint('更換失敗');
             }
-            this.popScene();
+        }
+    }
+
+    class Window_ExplorePlayerList extends Window_Selectable {
+        initialize(rect) {
+            super.initialize(rect);
+            this._players = [];
+            this.refresh();
+        }
+
+        setPlayers(players) {
+            this._players = players || [];
+            this.refresh();
+            this.select(0);
+        }
+
+        maxItems() {
+            return this._players.length;
+        }
+
+        itemHeight() {
+            return 56;
+        }
+
+        playerAt(index) {
+            return this._players[index];
+        }
+
+        drawAllItems() {
+            this.drawHeader();
+            Window_Selectable.prototype.drawAllItems.call(this);
+        }
+
+        drawHeader() {
+            const width = this.innerWidth - this.itemPadding() * 2;
+            this.contents.fontSize = 24;
+            this.changeTextColor(ColorManager.systemColor());
+            this.drawText(`線上玩家 (${this._players.length})`, this.itemPadding(), 4, width, "center");
+            this.resetTextColor();
+            this.resetFontSettings();
+        }
+
+        itemRect(index) {
+            const rect = Window_Selectable.prototype.itemRect.call(this, index);
+            rect.y += 44;
+            rect.height = this.itemHeight() - 6;
+            return rect;
+        }
+
+        drawItem(index) {
+            const player = this.playerAt(index);
+            if (!player) return;
+            const rect = this.itemRectWithPadding(index);
+
+            // 皮膚預覽
+            const parsed = parseSkinId(player.skin_id);
+            if (parsed) {
+                try {
+                    const bitmap = ImageManager.loadCharacter(parsed.characterName);
+                    if (bitmap && bitmap.isReady()) {
+                        const big = ImageManager.isBigCharacter(parsed.characterName);
+                        const pw = bitmap.width / (big ? 3 : 12);
+                        const ph = bitmap.height / (big ? 4 : 8);
+                        const n = big ? 0 : parsed.characterIndex;
+                        const sx = ((n % 4) * 3 + 1) * pw;
+                        const sy = Math.floor(n / 4) * 4 * ph;
+                        const scale = Math.min(40 / pw, 40 / ph, 1);
+                        this.contents.blt(bitmap, sx, sy, pw, ph, rect.x + 4, rect.y + (rect.height - ph * scale) / 2, pw * scale, ph * scale);
+                    } else if (bitmap) {
+                        bitmap.addLoadListener(() => this.refresh());
+                    }
+                } catch (e) { /* ignore */ }
+            }
+
+            const isMe = myUserId && String(player.user_id) === String(myUserId);
+            const level = player.level != null ? Number(player.level) : null;
+            const baseName = String(player.name || player.user_id || "Unknown");
+            const nameText = (level && level > 0) ? `Lv.${level} ${baseName}` : baseName;
+
+            this.contents.fontSize = 20;
+            if (isMe) this.changeTextColor(ColorManager.powerUpColor());
+            this.drawText(nameText + (isMe ? " (你)" : ""), rect.x + 52, rect.y + 2, rect.width - 56, "left");
+            this.resetTextColor();
+
+            const mapId = player.map_id != null ? Number(player.map_id) : null;
+            const mapInfo = mapId != null && $dataMapInfos && $dataMapInfos[mapId] ? $dataMapInfos[mapId].name : null;
+            this.contents.fontSize = 14;
+            this.contents.paintOpacity = 170;
+            this.drawText(mapInfo ? `位於 ${mapInfo}` : "位置不明", rect.x + 52, rect.y + 26, rect.width - 56, "left");
+            this.contents.paintOpacity = 255;
+            this.resetFontSettings();
+        }
+    }
+
+    class Scene_ExplorePlayerList extends Scene_MenuBase {
+        create() {
+            super.create();
+            const topInset = Math.max(this.buttonAreaBottom() + 8, 60);
+            const sideInset = 48;
+            const rect = new Rectangle(
+                sideInset,
+                topInset,
+                Graphics.boxWidth - sideInset * 2,
+                Graphics.boxHeight - topInset - 24
+            );
+            this._listWindow = new Window_ExplorePlayerList(rect);
+            this._listWindow.setHandler('ok', this.onOk.bind(this));
+            this._listWindow.setHandler('cancel', this.popScene.bind(this));
+            this.addWindow(this._listWindow);
+            this.refreshPlayers();
+        }
+
+        start() {
+            super.start();
+            this._listWindow.activate();
+            this._listWindow.select(0);
+        }
+
+        refreshPlayers() {
+            // 資料來源:remotePlayerStates(伺服器 room_state 廣播)+ 自己
+            const players = Object.values(remotePlayerStates).slice();
+            if (myUserId) {
+                players.unshift({
+                    user_id: String(myUserId),
+                    name: myName || "You",
+                    skin_id: $gamePlayer ? `${$gamePlayer._characterName}:${$gamePlayer._characterIndex}` : null,
+                    level: myLevel,
+                    map_id: getCurrentMapId(),
+                });
+            }
+            this._listWindow.setPlayers(players);
+        }
+
+        onOk() {
+            this._listWindow.activate();
         }
     }
 
@@ -1851,6 +2642,11 @@
 
         applySpaceTiles();
 
+        // 進入村莊地圖時自動同步任務狀態(開關 11-15)
+        if ($gameMap && $gameMap.mapId() === 11) {
+            syncQuestSwitches();
+        }
+
         // 清除舊地圖殘留的遠端玩家資料
         clearOtherPlayers();
         otherPlayers = {};
@@ -1862,6 +2658,280 @@
         } else {
             emitJoinCurrentGuild();
         }
+        _updateChatOverlay();
+        _updateEditorToolbar();
+    };
+
+    // --- Map Editor (admin-only, gated by server can_edit) ---
+    // 抽屜式面板(仿音樂播放器):右側中央 🛠️ 按鈕,展開後含圖層切換與 tile palette。
+    // 開啟抽屜 = 進入編輯模式,關閉 = 離開。
+
+    const TILE_DISPLAY = 34;   // palette 上每格顯示大小(原始 48px 縮放)
+    const PALETTE_COLS = 8;
+    let paletteTab = 'A';
+    let paletteEntries = [];   // 目前分頁的 [{tileId, setNumber, sx, sy}]
+
+    function _tilesetNames() {
+        const ts = $gameMap && typeof $gameMap.tileset === 'function' ? $gameMap.tileset() : null;
+        return ts ? ts.tilesetNames : null;
+    }
+
+    /** 自動地形(kind 0-127)縮圖來源:取該 autotile 區塊的左上 48x48(A1 為近似值) */
+    function _autotileThumbSource(kind) {
+        if (kind < 16) { // A1 水/瀑布
+            let bx, by;
+            if (kind === 0) { bx = 0; by = 0; }
+            else if (kind === 1) { bx = 0; by = 3; }
+            else if (kind === 2) { bx = 6; by = 0; }
+            else if (kind === 3) { bx = 6; by = 3; }
+            else {
+                bx = (Math.floor(kind / 4) % 2) * 8;
+                by = Math.floor(kind / 8) * 6 + (Math.floor(kind / 2) % 2) * 3;
+                if (kind % 2 === 1) bx += 6;
+            }
+            return { setNumber: 0, sx: bx * 48, sy: by * 48 };
+        } else if (kind < 48) { // A2 地面
+            const local = kind - 16;
+            return { setNumber: 1, sx: (local % 8) * 2 * 48, sy: Math.floor(local / 8) * 3 * 48 };
+        } else if (kind < 80) { // A3 建物
+            const local = kind - 48;
+            return { setNumber: 2, sx: (local % 8) * 2 * 48, sy: Math.floor(local / 8) * 2 * 48 };
+        } else { // A4 牆壁(高度 3,2,3,2… 交錯)
+            const local = kind - 80;
+            const row = Math.floor(local / 8);
+            const by = Math.floor(row / 2) * 5 + (row % 2) * 3;
+            return { setNumber: 3, sx: (local % 8) * 2 * 48, sy: by * 48 };
+        }
+    }
+
+    /** 一般圖塊(A5 / B-E)縮圖來源(對應 rmmz_core 的排版公式) */
+    function _normalTileSource(tileId) {
+        if (tileId >= 1536 && tileId < 2048) { // A5
+            const i = tileId - 1536;
+            return { setNumber: 4, sx: (i % 8) * 48, sy: Math.floor(i / 8) * 48 };
+        }
+        const setNumber = 5 + Math.floor(tileId / 256);
+        const sx = ((Math.floor(tileId / 128) % 2) * 8 + (tileId % 8)) * 48;
+        const sy = (Math.floor((tileId % 256) / 8) % 16) * 48;
+        return { setNumber, sx, sy };
+    }
+
+    function _paletteEntriesForTab(tab) {
+        const names = _tilesetNames();
+        if (!names) return [];
+        const entries = [];
+        if (tab === 'A') {
+            // 自動地形:選取後由 OcRam 自動接邊
+            for (let kind = 0; kind < 128; kind++) {
+                const src = _autotileThumbSource(kind);
+                if (!names[src.setNumber]) continue;
+                entries.push({ tileId: 2048 + kind * 48, ...src });
+            }
+            if (names[4]) { // A5 一般地磚
+                for (let i = 0; i < 128; i++) {
+                    entries.push({ tileId: 1536 + i, ..._normalTileSource(1536 + i) });
+                }
+            }
+        } else {
+            const base = { B: 0, C: 256, D: 512, E: 768 }[tab];
+            if (base == null) return [];
+            const setNumber = 5 + base / 256;
+            if (!names[setNumber]) return [];
+            for (let i = 0; i < 256; i++) {
+                entries.push({ tileId: base + i, ..._normalTileSource(base + i) });
+            }
+        }
+        return entries;
+    }
+
+    function _renderPaletteCanvas() {
+        const canvas = document.getElementById('ee-palette');
+        if (!canvas) return;
+        const entries = paletteEntries;
+        const rows = Math.max(1, Math.ceil(entries.length / PALETTE_COLS));
+        canvas.width = PALETTE_COLS * TILE_DISPLAY;
+        canvas.height = rows * TILE_DISPLAY;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        const names = _tilesetNames();
+        if (!names) return;
+
+        const drawEntry = (entry, index) => {
+            const dx = (index % PALETTE_COLS) * TILE_DISPLAY;
+            const dy = Math.floor(index / PALETTE_COLS) * TILE_DISPLAY;
+            try {
+                const bmp = ImageManager.loadTileset(names[entry.setNumber]);
+                const paint = () => {
+                    try {
+                        ctx.drawImage(bmp.canvas, entry.sx, entry.sy, 48, 48, dx, dy, TILE_DISPLAY, TILE_DISPLAY);
+                    } catch (e) { /* 個別縮圖失敗不擋整體 */ }
+                    if (entry.tileId === currentTileId) {
+                        ctx.strokeStyle = '#5cffa9';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(dx + 1, dy + 1, TILE_DISPLAY - 2, TILE_DISPLAY - 2);
+                    }
+                };
+                if (bmp.isReady()) paint();
+                else bmp.addLoadListener(paint);
+            } catch (e) { /* ignore */ }
+        };
+        entries.forEach(drawEntry);
+    }
+
+    function _switchPaletteTab(tab) {
+        paletteTab = tab;
+        paletteEntries = _paletteEntriesForTab(tab);
+        const tabRow = document.getElementById('ee-tabs');
+        if (tabRow) {
+            for (const btn of tabRow.children) {
+                const active = btn.dataset.tab === tab;
+                btn.style.background = active ? 'rgba(92,169,255,0.5)' : 'rgba(255,255,255,0.12)';
+            }
+        }
+        _renderPaletteCanvas();
+    }
+
+    function _ensureEditorToolbarDOM() {
+        if (document.getElementById('explore-editor-shell')) return;
+        const shell = document.createElement('div');
+        shell.id = 'explore-editor-shell';
+        shell.style.cssText = [
+            'position:fixed', 'right:14px', 'top:50%', 'transform:translateY(-50%)',
+            'z-index:9997', 'display:none',
+            'pointer-events:none', 'font-family:sans-serif', 'user-select:none',
+        ].join(';');
+        shell.innerHTML = `
+<div id="ee-panel" style="position:absolute;right:0;top:50%;transform:translate(calc(100% + 12px), -50%);opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:none;background:linear-gradient(135deg, rgba(30,18,12,0.96), rgba(60,38,27,0.93));color:#fff;border-radius:16px;padding:12px;box-shadow:0 18px 38px rgba(0,0,0,0.42);border:1px solid rgba(255,255,255,0.1);width:308px;max-width:calc(100vw - 96px)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <span style="font-weight:700;font-size:13px">🛠️ 地圖編輯</span>
+    <span style="font-size:11px;opacity:0.6">左鍵放置 / 右鍵吸取 / 1-4 圖層</span>
+  </div>
+  <div style="display:flex;gap:4px;align-items:center;margin-bottom:8px">
+    <span style="font-size:12px;opacity:0.75">圖層</span>
+    <div id="ee-layers" style="display:flex;gap:4px"></div>
+    <span style="flex:1"></span>
+    <button id="ee-eraser" style="background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px">🧽 橡皮擦</button>
+  </div>
+  <div id="ee-tabs" style="display:flex;gap:4px;margin-bottom:6px"></div>
+  <div style="max-height:280px;overflow-y:auto;border-radius:8px;scrollbar-width:thin">
+    <canvas id="ee-palette" style="display:block;cursor:pointer;image-rendering:pixelated"></canvas>
+  </div>
+  <div style="font-size:11px;opacity:0.7;margin-top:6px">目前 Tile: <span id="ee-tile" style="font-weight:700">0</span></div>
+</div>
+<button id="ee-launcher" title="地圖編輯" style="position:relative;width:52px;height:52px;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:linear-gradient(135deg, rgba(255,255,255,0.2), rgba(255,170,64,0.28));box-shadow:0 14px 28px rgba(0,0,0,0.3);cursor:pointer;pointer-events:auto;display:flex;align-items:center;justify-content:center;padding:0;transition:transform 220ms ease, background 220ms ease">
+  <span style="font-size:22px;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.35)">🛠️</span>
+</button>`;
+        document.body.appendChild(shell);
+        _preventFocusSteal(shell);
+
+        // 防止面板互動穿透到遊戲(避免誤放地磚/誤觸移動)
+        for (const evName of ['mousedown', 'mouseup', 'touchstart', 'touchend', 'contextmenu', 'wheel', 'click']) {
+            shell.addEventListener(evName, (ev) => ev.stopPropagation());
+        }
+
+        document.getElementById('ee-launcher').onclick = () => {
+            isEditMode = !isEditMode;
+            if (isEditMode) {
+                _switchPaletteTab(paletteTab);
+                showHint("編輯模式:左鍵放置、右鍵吸取");
+            } else {
+                showHint("已離開編輯模式");
+            }
+            _updateEditorToolbar();
+        };
+
+        const layerRow = document.getElementById('ee-layers');
+        for (let layer = 0; layer < 4; layer++) {
+            const btn = document.createElement('button');
+            btn.textContent = String(layer + 1);
+            btn.dataset.layer = String(layer);
+            btn.style.cssText = 'background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:12px';
+            btn.onclick = () => {
+                currentZ = layer;
+                _updateEditorToolbar();
+            };
+            layerRow.appendChild(btn);
+        }
+
+        const tabRow = document.getElementById('ee-tabs');
+        for (const tab of ['A', 'B', 'C', 'D', 'E']) {
+            const btn = document.createElement('button');
+            btn.textContent = tab;
+            btn.dataset.tab = tab;
+            btn.style.cssText = 'flex:1;background:rgba(255,255,255,0.12);border:none;color:#fff;border-radius:6px;padding:4px 0;cursor:pointer;font-size:12px';
+            btn.onclick = () => _switchPaletteTab(tab);
+            tabRow.appendChild(btn);
+        }
+
+        document.getElementById('ee-eraser').onclick = () => {
+            currentTileId = 0;
+            _updateEditorToolbar();
+            _renderPaletteCanvas();
+            showHint("已選擇橡皮擦(Tile 0)");
+        };
+
+        const canvas = document.getElementById('ee-palette');
+        canvas.addEventListener('click', (ev) => {
+            const rect = canvas.getBoundingClientRect();
+            const col = Math.floor((ev.clientX - rect.left) / TILE_DISPLAY);
+            const row = Math.floor((ev.clientY - rect.top) / TILE_DISPLAY);
+            const index = row * PALETTE_COLS + col;
+            const entry = paletteEntries[index];
+            if (!entry) return;
+            currentTileId = entry.tileId;
+            _updateEditorToolbar();
+            _renderPaletteCanvas();
+        });
+    }
+
+    function _updateEditorToolbar() {
+        _ensureEditorToolbarDOM();
+        const shell = document.getElementById('explore-editor-shell');
+        const panel = document.getElementById('ee-panel');
+        const launcher = document.getElementById('ee-launcher');
+        const tileEl = document.getElementById('ee-tile');
+        if (!shell || !panel || !launcher) return;
+
+        // 只有管理員在伺服器空間(非世界地圖、非忽略地圖)才顯示入口
+        const show = canEditCurrentSpace && !isWorldMap && !isIgnoredMap();
+        shell.style.display = show ? 'block' : 'none';
+        if (!show) {
+            isEditMode = false;
+            return;
+        }
+
+        panel.style.transform = isEditMode ? 'translate(calc(-52px - 12px), -50%)' : 'translate(calc(100% + 12px), -50%)';
+        panel.style.opacity = isEditMode ? '1' : '0';
+        panel.style.pointerEvents = isEditMode ? 'auto' : 'none';
+        launcher.style.background = isEditMode
+            ? 'linear-gradient(135deg, rgba(92,255,169,0.4), rgba(255,170,64,0.32))'
+            : 'linear-gradient(135deg, rgba(255,255,255,0.2), rgba(255,170,64,0.28))';
+
+        if (tileEl) tileEl.textContent = String(currentTileId);
+        const layerRow = document.getElementById('ee-layers');
+        if (layerRow) {
+            for (const btn of layerRow.children) {
+                const active = Number(btn.dataset.layer) === currentZ;
+                btn.style.background = active ? 'rgba(92,169,255,0.5)' : 'rgba(255,255,255,0.12)';
+            }
+        }
+    }
+
+    // 編輯模式下右鍵不呼叫選單/返回(改為吸取工具)
+    const _Scene_Map_isMenuCalled = Scene_Map.prototype.isMenuCalled;
+    Scene_Map.prototype.isMenuCalled = function () {
+        if (isEditMode && canEditCurrentSpace && !isWorldMap) {
+            return Input.isTriggered("menu"); // 只允許鍵盤(Esc/X)開選單
+        }
+        return _Scene_Map_isMenuCalled.call(this);
+    };
+
+    // 編輯模式下點擊地圖不觸發移動(目的地根本不設定)
+    const _Scene_Map_processMapTouch = Scene_Map.prototype.processMapTouch;
+    Scene_Map.prototype.processMapTouch = function () {
+        if (isEditMode && canEditCurrentSpace && !isWorldMap) return;
+        _Scene_Map_processMapTouch.call(this);
     };
 
     // --- Input Handling for Editor ---
@@ -1876,27 +2946,17 @@
             cb();
         }
 
-        if (isEditMode && !isWorldMap) {
+        if (isEditMode && canEditCurrentSpace && !isWorldMap) {
             this.updateEditorInput();
         }
     };
 
     Scene_Map.prototype.updateEditorInput = function () {
-        // Save: S key (KeyCode 83)
-        if (Input.isTriggered('s') || Input.isTriggered('menu')) { // 'menu' is usually X or Esc, let's use a specific key check if possible
-            // RMMZ Input mapper doesn't map 's' by default.
-            // We can check raw key or add mapper.
-        }
-
-        // We'll use TouchInput for mouse interaction
         if (TouchInput.isTriggered()) {
             const x = $gameMap.canvasToMapX(TouchInput.x);
             const y = $gameMap.canvasToMapY(TouchInput.y);
-
-            // Left Click: Place
-            // But TouchInput doesn't distinguish Left/Right easily in RMMZ core without mods?
-            // Actually TouchInput.isCancelled() is Right Click.
-
+            // 編輯模式下不要讓點擊觸發移動
+            $gameTemp.clearDestination();
             this.placeTile(x, y);
         } else if (TouchInput.isCancelled()) {
             const x = $gameMap.canvasToMapX(TouchInput.x);
@@ -1922,28 +2982,20 @@
 
     Scene_Map.prototype.pickTile = function (x, y) {
         if (!$gameMap.isValid(x, y)) return;
-
-        // Get tile ID at x, y, z
-        // $gameMap.tileId(x, y, z)
-        // Note: RMMZ layers are 0-3 usually.
-        // OcRam uses 1-based Z in params but 0-based in logic?
-        // "z = pz < 1 ? 0 : pz - 1;" -> So if we pass 0, it uses 0.
-
-        // We need to know which layer we are editing.
-        // For now, let's just pick from the top-most visible layer or iterate?
-        // Let's default to layer 0 (Ground) for now or cycle?
-
-        // Simple picker: Pick from layer 0
         currentTileId = $gameMap.tileId(x, y, currentZ);
-        console.log("Picked tile:", currentTileId);
+        showHint(`已吸取 Tile ${currentTileId}(圖層 ${currentZ + 1})`);
+        _updateEditorToolbar();
+        _renderPaletteCanvas();
     };
 
     document.addEventListener('keydown', (event) => {
-        // Layer switching
-        if (event.key === '1') { currentZ = 0; console.log("Layer 1"); }
-        if (event.key === '2') { currentZ = 1; console.log("Layer 2"); }
-        if (event.key === '3') { currentZ = 2; console.log("Layer 3"); }
-        if (event.key === '4') { currentZ = 3; console.log("Layer 4"); }
+        // 打字時(聊天輸入框聚焦)不要切圖層
+        if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+        if (!isEditMode) return;
+        if (event.key === '1') { currentZ = 0; _updateEditorToolbar(); }
+        if (event.key === '2') { currentZ = 1; _updateEditorToolbar(); }
+        if (event.key === '3') { currentZ = 2; _updateEditorToolbar(); }
+        if (event.key === '4') { currentZ = 3; _updateEditorToolbar(); }
     });
 
 })();
