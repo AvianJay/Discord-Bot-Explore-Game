@@ -719,6 +719,18 @@
         });
     }
 
+    /** 左下角按鈕 dock:依可見狀態由下往上疊(音樂→聊天→編輯),避免互相重疊或留空 */
+    function _layoutLeftDock() {
+        const slots = ['explore-music-shell', 'explore-chat-shell', 'explore-editor-shell'];
+        let bottom = 14;
+        for (const id of slots) {
+            const shell = document.getElementById(id);
+            if (!shell || shell.style.display === 'none') continue;
+            shell.style.bottom = bottom + 'px';
+            bottom += 52 + 10; // 按鈕高 + 間距
+        }
+    }
+
     /** Create the music overlay DOM element if it doesn't exist yet. */
     function _ensureMusicOverlayDOM() {
         if (document.getElementById('explore-music-shell')) return;
@@ -726,12 +738,13 @@
         shell.id = 'explore-music-shell';
         shell.style.cssText = [
             'position:fixed', 'left:14px', 'bottom:14px',
+            'width:52px', 'height:52px',
             'z-index:9999', 'display:none',
             'pointer-events:none', 'font-family:sans-serif',
             'user-select:none'
         ].join(';');
         shell.innerHTML = `
-<div id="explore-music-overlay" style="position:relative;width:300px;max-width:calc(100vw - 28px);background:linear-gradient(135deg, rgba(12,18,30,0.96), rgba(27,38,60,0.92));color:#fff;border-radius:18px;padding:14px 14px 12px 14px;box-shadow:0 18px 38px rgba(0,0,0,0.42);backdrop-filter:blur(10px);transform:translateX(calc(-100% - 12px));opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:auto;border:1px solid rgba(255,255,255,0.09)">
+<div id="explore-music-overlay" style="position:absolute;left:64px;bottom:0;width:300px;max-width:calc(100vw - 96px);background:linear-gradient(135deg, rgba(12,18,30,0.96), rgba(27,38,60,0.92));color:#fff;border-radius:18px;padding:14px 14px 12px 14px;box-shadow:0 18px 38px rgba(0,0,0,0.42);backdrop-filter:blur(10px);transform:translateX(-12px);opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:none;border:1px solid rgba(255,255,255,0.09)">
   <div id="emp-info" style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
     <img id="emp-thumb" src="" style="width:46px;height:46px;border-radius:10px;object-fit:cover;display:none;flex-shrink:0;box-shadow:0 6px 16px rgba(0,0,0,0.28)"/>
     <div id="emp-fallback-icon" style="width:46px;height:46px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:rgba(255,255,255,0.11);font-size:22px">🎵</div>
@@ -796,13 +809,16 @@
         if (!_shouldShowMusicLauncher()) {
             shell.style.display = 'none';
             musicUiVisible = false;
+            _layoutLeftDock();
             return;
         }
 
         shell.style.display = 'block';
-        drawer.style.transform = musicUiVisible ? 'translateX(0)' : 'translateX(calc(-100% - 12px))';
+        _layoutLeftDock();
+        drawer.style.transform = musicUiVisible ? 'translateX(0)' : 'translateX(-12px)';
         drawer.style.opacity = musicUiVisible ? '1' : '0';
-        launcher.style.transform = musicUiVisible ? 'translateX(248px) scale(0.98)' : 'translateX(0) scale(1)';
+        drawer.style.pointerEvents = musicUiVisible ? 'auto' : 'none';
+        launcher.style.transform = musicUiVisible ? 'scale(0.98)' : 'scale(1)';
         launcher.style.borderRadius = musicUiVisible ? '14px' : '16px';
         launcher.style.boxShadow = musicUiVisible
             ? '0 16px 30px rgba(0,0,0,0.38)'
@@ -873,12 +889,13 @@
         const shell = document.createElement('div');
         shell.id = 'explore-chat-shell';
         shell.style.cssText = [
-            'position:fixed', 'right:14px', 'bottom:14px',
+            'position:fixed', 'left:14px', 'bottom:76px',
+            'width:52px', 'height:52px',
             'z-index:9998', 'display:none',
             'pointer-events:none', 'font-family:sans-serif',
         ].join(';');
         shell.innerHTML = `
-<div id="explore-chat-panel" style="position:relative;width:340px;max-width:calc(100vw - 28px);margin-bottom:64px;background:linear-gradient(135deg, rgba(12,18,30,0.96), rgba(27,38,60,0.92));color:#fff;border-radius:18px;padding:12px;box-shadow:0 18px 38px rgba(0,0,0,0.42);backdrop-filter:blur(10px);transform:translateX(calc(100% + 12px));opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:auto;border:1px solid rgba(255,255,255,0.09)">
+<div id="explore-chat-panel" style="position:absolute;left:64px;bottom:0;width:340px;max-width:calc(100vw - 96px);background:linear-gradient(135deg, rgba(12,18,30,0.96), rgba(27,38,60,0.92));color:#fff;border-radius:18px;padding:12px;box-shadow:0 18px 38px rgba(0,0,0,0.42);backdrop-filter:blur(10px);transform:translateX(-12px);opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:none;border:1px solid rgba(255,255,255,0.09)">
   <div style="font-weight:700;font-size:13px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center">
     <span>💬 聊天室</span>
     <span id="ec-room" style="opacity:0.6;font-size:11px;font-weight:400"></span>
@@ -890,7 +907,7 @@
     <button id="ec-send" style="background:rgba(92,169,255,0.35);border:none;color:#fff;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px">送出</button>
   </div>
 </div>
-<button id="explore-chat-toggle" title="聊天室" style="position:absolute;right:0;bottom:0;width:52px;height:52px;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:linear-gradient(135deg, rgba(255,255,255,0.2), rgba(92,255,169,0.26));box-shadow:0 14px 28px rgba(0,0,0,0.3);cursor:pointer;pointer-events:auto;display:flex;align-items:center;justify-content:center;padding:0;transition:transform 220ms ease">
+<button id="explore-chat-toggle" title="聊天室" style="position:absolute;left:0;bottom:0;width:52px;height:52px;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:linear-gradient(135deg, rgba(255,255,255,0.2), rgba(92,255,169,0.26));box-shadow:0 14px 28px rgba(0,0,0,0.3);cursor:pointer;pointer-events:auto;display:flex;align-items:center;justify-content:center;padding:0;transition:transform 220ms ease">
   <span style="position:relative;font-size:22px;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.35)">💬</span>
   <span id="ec-badge" style="position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;border-radius:9px;background:#ff4d5e;color:#fff;font-size:11px;font-weight:700;display:none;align-items:center;justify-content:center;padding:0 4px">0</span>
 </button>`;
@@ -952,11 +969,13 @@
         if (!_shouldShowChatLauncher()) {
             shell.style.display = 'none';
             chatUiVisible = false;
+            _layoutLeftDock();
             return;
         }
 
         shell.style.display = 'block';
-        panel.style.transform = chatUiVisible ? 'translateX(0)' : 'translateX(calc(100% + 12px))';
+        _layoutLeftDock();
+        panel.style.transform = chatUiVisible ? 'translateX(0)' : 'translateX(-12px)';
         panel.style.opacity = chatUiVisible ? '1' : '0';
         panel.style.pointerEvents = chatUiVisible ? 'auto' : 'none';
         launcher.style.transform = chatUiVisible ? 'scale(0.98)' : 'scale(1)';
@@ -2797,12 +2816,13 @@
         const shell = document.createElement('div');
         shell.id = 'explore-editor-shell';
         shell.style.cssText = [
-            'position:fixed', 'right:14px', 'top:50%', 'transform:translateY(-50%)',
+            'position:fixed', 'left:14px', 'bottom:138px',
+            'width:52px', 'height:52px',
             'z-index:9997', 'display:none',
             'pointer-events:none', 'font-family:sans-serif', 'user-select:none',
         ].join(';');
         shell.innerHTML = `
-<div id="ee-panel" style="position:absolute;right:0;top:50%;transform:translate(calc(100% + 12px), -50%);opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:none;background:linear-gradient(135deg, rgba(30,18,12,0.96), rgba(60,38,27,0.93));color:#fff;border-radius:16px;padding:12px;box-shadow:0 18px 38px rgba(0,0,0,0.42);border:1px solid rgba(255,255,255,0.1);width:308px;max-width:calc(100vw - 96px)">
+<div id="ee-panel" style="position:absolute;left:64px;bottom:0;transform:translateX(-12px);opacity:0;transition:transform 220ms ease, opacity 220ms ease;pointer-events:none;background:linear-gradient(135deg, rgba(30,18,12,0.96), rgba(60,38,27,0.93));color:#fff;border-radius:16px;padding:12px;box-shadow:0 18px 38px rgba(0,0,0,0.42);border:1px solid rgba(255,255,255,0.1);width:308px;max-width:calc(100vw - 96px)">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
     <span style="font-weight:700;font-size:13px">🛠️ 地圖編輯</span>
     <span style="font-size:11px;opacity:0.6">左鍵放置 / 右鍵吸取 / 1-4 圖層</span>
@@ -2819,7 +2839,7 @@
   </div>
   <div style="font-size:11px;opacity:0.7;margin-top:6px">目前 Tile: <span id="ee-tile" style="font-weight:700">0</span></div>
 </div>
-<button id="ee-launcher" title="地圖編輯" style="position:relative;width:52px;height:52px;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:linear-gradient(135deg, rgba(255,255,255,0.2), rgba(255,170,64,0.28));box-shadow:0 14px 28px rgba(0,0,0,0.3);cursor:pointer;pointer-events:auto;display:flex;align-items:center;justify-content:center;padding:0;transition:transform 220ms ease, background 220ms ease">
+<button id="ee-launcher" title="地圖編輯" style="position:absolute;left:0;bottom:0;width:52px;height:52px;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:linear-gradient(135deg, rgba(255,255,255,0.2), rgba(255,170,64,0.28));box-shadow:0 14px 28px rgba(0,0,0,0.3);cursor:pointer;pointer-events:auto;display:flex;align-items:center;justify-content:center;padding:0;transition:transform 220ms ease, background 220ms ease">
   <span style="font-size:22px;color:#fff;text-shadow:0 2px 10px rgba(0,0,0,0.35)">🛠️</span>
 </button>`;
         document.body.appendChild(shell);
@@ -2896,12 +2916,13 @@
         // 只有管理員在伺服器空間(非世界地圖、非忽略地圖)才顯示入口
         const show = canEditCurrentSpace && !isWorldMap && !isIgnoredMap();
         shell.style.display = show ? 'block' : 'none';
+        _layoutLeftDock();
         if (!show) {
             isEditMode = false;
             return;
         }
 
-        panel.style.transform = isEditMode ? 'translate(calc(-52px - 12px), -50%)' : 'translate(calc(100% + 12px), -50%)';
+        panel.style.transform = isEditMode ? 'translateX(0)' : 'translateX(-12px)';
         panel.style.opacity = isEditMode ? '1' : '0';
         panel.style.pointerEvents = isEditMode ? 'auto' : 'none';
         launcher.style.background = isEditMode
