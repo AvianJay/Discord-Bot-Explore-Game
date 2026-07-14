@@ -151,6 +151,20 @@
     let isDevMode = false;
     let _pendingInputCallback = null;
 
+    // Discord's Android client can keep the embedded iframe unfocused until a
+    // tap, and may not restore that focus after closing the OAuth consent UI.
+    // RMMZ normally pauses every scene update when window.top has no focus,
+    // which leaves the initial fade or the post-OAuth event stuck on one frame.
+    // In an Activity, visibility is the reliable lifecycle signal instead.
+    const isDiscordAndroidActivity =
+        new URLSearchParams(window.location.search).has('instance_id') &&
+        /Android/i.test(navigator.userAgent);
+    if (isDiscordAndroidActivity) {
+        SceneManager.isGameActive = function () {
+            return document.visibilityState !== 'hidden';
+        };
+    }
+
     function detectDevMode() {
         const urlParams = new URLSearchParams(window.location.search);
         if (!urlParams.get('instance_id')) {
