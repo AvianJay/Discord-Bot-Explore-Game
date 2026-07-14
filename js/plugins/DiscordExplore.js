@@ -3019,4 +3019,37 @@
         if (event.key === '4') { currentZ = 3; _updateEditorToolbar(); }
     });
 
+    async function authenticatedRequest(path, options = {}) {
+        if (!exploreAuthToken) {
+            const error = new Error("Explore 尚未完成 Discord 驗證。");
+            error.status = 401;
+            throw error;
+        }
+        const url = new URL(String(path || ""), window.location.origin);
+        if (url.origin !== window.location.origin || !url.pathname.startsWith("/api/explore/")) {
+            throw new Error("DiscordExploreBridge 僅允許 Explore API 路徑。");
+        }
+        const headers = new Headers(options.headers || {});
+        headers.set("Authorization", `Bearer ${exploreAuthToken}`);
+        if (options.body != null && !headers.has("Content-Type")) {
+            headers.set("Content-Type", "application/json");
+        }
+        const response = await fetch(`${url.pathname}${url.search}`, { ...options, headers });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            const error = new Error(data.error || `Request failed (${response.status})`);
+            error.status = response.status;
+            error.data = data;
+            throw error;
+        }
+        return data;
+    }
+
+    // The token remains private; other plugins only receive a request capability.
+    window.DiscordExploreBridge = Object.freeze({
+        request: authenticatedRequest,
+        isAuthenticated: () => Boolean(exploreAuthToken),
+        isDevMode: () => Boolean(isDevMode),
+    });
+
 })();
