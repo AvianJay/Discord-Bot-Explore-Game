@@ -99,6 +99,21 @@
     const MAP_WORLD = 1;
     const MAP_SPACE = 2; // MAP002 — 伺服器空間
     const MAP_WAIT  = 3; // 等待室 / 起始地圖
+    const MAP_PRESENCE_NAMES = Object.freeze({
+        1: "探索大廳",
+        2: "伺服器空間",
+        3: "等待室",
+        4: "異世界",
+        5: "序章",
+        6: "海域",
+        7: "記憶空間",
+        8: "破碎世界",
+        9: "深海",
+        10: "村莊外圍",
+        11: "村莊",
+        12: "旅館",
+        14: "全域賭場",
+    });
 
     // 不加入任何房間的地圖 ID（等待室、過場動畫等）
     const IGNORED_MAPS = [3, 4, 5, 6, 7, 8, 9];
@@ -130,6 +145,9 @@
     let lastY = -1;
     let upTime = new Date();
     let musicStatePollTimer = null;
+    let currentGuildName = null;
+    let currentGuildIcon = null;
+    let lastActivitySignature = null;
 
     // Music player state
     let musicState = null;       // null | {title, author, thumbnail, url, current, playing, is_radio, is_paused, available}
@@ -200,6 +218,15 @@
         if (!$gameMap || typeof $gameMap.mapId !== "function") return null;
         const mapId = Number($gameMap.mapId());
         return Number.isInteger(mapId) && mapId > 0 ? mapId : null;
+    }
+
+    function getCurrentMapPresenceName() {
+        const mapId = getCurrentMapId();
+        if (mapId == null) return "探索空間";
+        if (MAP_PRESENCE_NAMES[mapId]) return MAP_PRESENCE_NAMES[mapId];
+        const mapInfo = $dataMapInfos && $dataMapInfos[mapId];
+        const mapName = mapInfo && String(mapInfo.name || "").trim();
+        return mapName || `地圖 ${mapId}`;
     }
 
     function normalizeRemoteMapId(value, fallback = null) {
@@ -423,29 +450,53 @@
         }
     }
 
-    async function setActivity(details, guild_name, guild_icon) {
+    async function setActivity(details, placeName, placeIcon, state = "探索空間") {
         // Avoid SDK validation errors if SDK isn't ready yet or if RPC rejects the payload.
         if (!discordSdk || !discordSdk.commands || typeof discordSdk.commands.setActivity !== "function") return;
+
+        const activitySignature = JSON.stringify([details, state, placeName, placeIcon]);
+        if (activitySignature === lastActivitySignature) return;
 
         try {
             await discordSdk.commands.setActivity({
                 activity: {
                     type: 0,
-                    // state: "",
+                    state: String(state ?? "探索空間"),
                     url: "https://discord.com/activities/" + clientId,
                     details: String(details ?? ""),
                     assets: {
                         large_text: "探索空間",
                         large_image: "explore",
-                        small_text: String(guild_name ?? "大廳"),
-                        small_image: String(guild_icon ?? "lobby"),
+                        small_text: String(placeName ?? "探索空間"),
+                        small_image: String(placeIcon ?? "lobby"),
                     },
                     timestamps: { start: upTime.getTime() }
                 }
             });
+            lastActivitySignature = activitySignature;
         } catch (e) {
             console.warn("Discord setActivity failed:", e);
         }
+    }
+
+    function refreshActivityForCurrentMap() {
+        const mapId = getCurrentMapId();
+        if (mapId == null) return;
+
+        if (!isWorldMap && mapId === MAP_SPACE) {
+            const guildName = currentGuildName || "Discord 伺服器";
+            setActivity(
+                `在 ${guildName} 的空間`,
+                guildName,
+                currentGuildIcon || "lobby",
+                "伺服器空間"
+            );
+            return;
+        }
+
+        const locationName = getCurrentMapPresenceName();
+        const details = mapId === MAP_WAIT ? "正在進入 Explore" : `在 ${locationName}`;
+        setActivity(details, locationName, "lobby", "全域空間");
     }
 
     function connectSocket() {
@@ -993,7 +1044,11 @@
         panel.style.opacity = chatUiVisible ? '1' : '0';
         panel.style.pointerEvents = chatUiVisible ? 'auto' : 'none';
         launcher.style.transform = chatUiVisible ? 'scale(0.98)' : 'scale(1)';
-        if (room) room.textContent = String(currentGuildId) === 'world' ? '大廳' : '';
+        if (room) {
+            room.textContent = String(currentGuildId) === 'world'
+                ? '全域聊天室'
+                : `${currentGuildName || '伺服器'}聊天室`;
+        }
         if (badge) {
             badge.style.display = (!chatUiVisible && chatUnreadCount > 0) ? 'flex' : 'none';
             badge.textContent = String(Math.min(chatUnreadCount, 99));
@@ -1309,6 +1364,8 @@
 
         currentGuildId = 'world';
         isWorldMap = true;
+        currentGuildName = null;
+        currentGuildIcon = null;
         pendingSpaceTiles = null;
 
         if ($gamePlayer) {
@@ -1517,15 +1574,17 @@
 
     function fetchMapData() {
         if (isWorldMap) {
-            setActivity("在大廳", "大廳", "lobby");
+            refreshActivityForCurrentMap();
             canEditCurrentSpace = false;
             isEditMode = false;
             _updateEditorToolbar();
+            _updateChatOverlay();
             return;
         }
 
         // Fetch guild info for activity
-        fetch(`/api/explore/server/${currentGuildId}`, {
+        const requestedGuildId = String(currentGuildId);
+        fetch(`/api/explore/server/${requestedGuildId}`, {
             headers: { "Authorization": `Bearer ${exploreAuthToken}` }
         })
             .then(res => res.json())
@@ -1534,12 +1593,16 @@
                     console.error(data.error);
                     return;
                 }
+                if (isWorldMap || String(currentGuildId) !== requestedGuildId) return;
                 const guild_name = data.name || "未知伺服器";
                 const guild_icon = data.icon_url || "lobby";
-                setActivity(`在 ${guild_name} 的空間`, guild_name, guild_icon);
+                currentGuildName = guild_name;
+                currentGuildIcon = guild_icon;
+                refreshActivityForCurrentMap();
                 canEditCurrentSpace = !!data.can_edit;
                 if (!canEditCurrentSpace) isEditMode = false;
                 _updateEditorToolbar();
+                _updateChatOverlay();
             })
             .catch(e => console.error("Failed to fetch guild info", e));
 
@@ -2644,6 +2707,8 @@
 
         currentGuildId = String(guildId);
         isWorldMap = false;
+        currentGuildName = null;
+        currentGuildIcon = null;
 
         if ($gamePlayer) {
             $gamePlayer.reserveTransfer(MAP_SPACE, 11, 11, 8, 0);
@@ -2691,6 +2756,7 @@
         } else {
             emitJoinCurrentGuild();
         }
+        refreshActivityForCurrentMap();
         _updateChatOverlay();
         _updateEditorToolbar();
     };
