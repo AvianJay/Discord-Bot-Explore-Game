@@ -57,6 +57,13 @@
     let devRoundCounter = 0;
     const devRounds = new Map();
 
+    function nextLotteryDrawAt() {
+        const drawAt = new Date();
+        drawAt.setUTCMinutes(0, 0, 0);
+        drawAt.setUTCHours(drawAt.getUTCHours() + 1);
+        return drawAt.toISOString();
+    }
+
     function requestId() {
         if (window.crypto && typeof window.crypto.randomUUID === "function") {
             return window.crypto.randomUUID();
@@ -116,7 +123,7 @@
             bet_min: BET_MIN,
             bet_max: BET_MAX,
             active_rounds: [...devRounds.values()].filter(round => round.status === "active"),
-            lottery: { jackpot: 3200, draw_at: new Date(Date.now() + 3600000).toISOString(), my_tickets: {} },
+            lottery: { jackpot: 3200, draw_at: nextLotteryDrawAt(), my_tickets: {} },
         });
     }
 
@@ -169,7 +176,7 @@
             payout: 0,
             balance: devBalance,
             currency_name: "測試全域幣",
-            lottery: { jackpot: 3200 + payload.bet, draw_at: new Date(Date.now() + 3600000).toISOString(), my_tickets: { [String(payload.number).padStart(2, "0")]: payload.bet } },
+            lottery: { jackpot: 3200 + payload.bet, draw_at: nextLotteryDrawAt(), my_tickets: { [String(payload.number).padStart(2, "0")]: payload.bet } },
         });
     }
 
@@ -1335,6 +1342,10 @@
     class Scene_CasinoTable extends Scene_MenuBase {
         prepare(game) {
             this._game = GAME_NAMES[game] ? game : "slots";
+        }
+
+        needsCancelButton() {
+            return false;
         }
 
         createBackground() {
