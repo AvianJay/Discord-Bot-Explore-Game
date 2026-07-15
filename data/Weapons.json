@@ -1,6 +1,6 @@
 [
 null,
-{"id":1,"animationId":6,"description":"[劍]輕巧易上手的短刃劍。","etypeId":1,"traits":[{"code":31,"dataId":1,"value":0},{"code":22,"dataId":0,"value":0}],"iconIndex":97,"name":"短劍","note":"","params":[0,0,8,0,0,0,0,0],"price":300,"wtypeId":2},
+{"id":1,"animationId":6,"description":"[劍]輕巧易上手的短刃劍。","etypeId":1,"traits":[{"code":31,"dataId":1,"value":0},{"code":22,"dataId":0,"value":0}],"iconIndex":97,"name":"短劍","note":"","params":[0,0,8,0,0,0,0,0],"price":300,"wtypeId":0},
 {"id":2,"animationId":6,"description":"[劍]有著鋒利刀身的長刃劍。","etypeId":1,"traits":[{"code":31,"dataId":1,"value":0},{"code":22,"dataId":0,"value":0}],"iconIndex":97,"name":"長劍","note":"","params":[0,0,12,0,0,0,0,0],"price":670,"wtypeId":2},
 {"id":3,"animationId":6,"description":"[劍]帶有彎曲刀身的寬劍。","etypeId":1,"traits":[{"code":31,"dataId":1,"value":0},{"code":22,"dataId":0,"value":0}],"iconIndex":97,"name":"彎刀","note":"","params":[0,0,18,0,0,0,0,0],"price":1480,"wtypeId":2},
 {"id":4,"animationId":6,"description":"[劍]以秘銀鍛造的長劍。","etypeId":1,"traits":[{"code":31,"dataId":1,"value":0},{"code":22,"dataId":0,"value":0}],"iconIndex":97,"name":"秘銀劍","note":"","params":[0,0,25,0,0,0,0,0],"price":3890,"wtypeId":2},
