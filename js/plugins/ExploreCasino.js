@@ -852,7 +852,7 @@
 
         playResponse(response) {
             playCasinoSe("Move2", 85, 110);
-            return this.animate("roll", response, 52).then(() => playCasinoSe(response.result?.won ? "Bell2" : "Buzzer2", 80));
+            return this.animate("roll", response, 52).then(() => playCasinoSe(response.result?.won ? "Applause1" : "Buzzer2", 80));
         }
     }
 
@@ -913,7 +913,7 @@
 
         playResponse(response) {
             playCasinoSe("Coin", 88, 120);
-            return this.animate("flip", response, 58).then(() => playCasinoSe(response.result?.won ? "Bell1" : "Buzzer1", 75));
+            return this.animate("flip", response, 58).then(() => playCasinoSe(response.result?.won ? "Applause1" : "Bell1", 75));
         }
     }
 
@@ -1272,7 +1272,7 @@
 
         playResponse(response) {
             playCasinoSe("Book1", 78, 110);
-            return this.animate("flip", response, 44).then(() => playCasinoSe(response.result?.outcome === "lose" ? "Buzzer1" : "Bell1", 75));
+            return this.animate("flip", response, 44).then(() => playCasinoSe(response.result?.outcome === "lose" ? "Bell1" : "Applause1", 75));
         }
     }
 
